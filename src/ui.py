@@ -806,11 +806,8 @@ div[data-testid="stMultiSelect"] label p {
 def render_tab_resultados(df_merged: Optional[pd.DataFrame], run_summary: Optional[Dict[str, Any]]) -> None:
     st.subheader("Results dashboard")
 
-    if df_merged is None:
-        st.info("No results yet. Run the analysis first.")
-        return
-    if df_merged.empty:
-        st.warning("No results to display.")
+    if df_merged is None or df_merged.empty:
+        st.info("No results yet. Run the analysis to populate this tab.")
         return
 
     df = df_merged.copy()
@@ -880,11 +877,22 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame], run_summary: Option
 # -----------------------------------------------------------------------------
 # Logs tab
 # -----------------------------------------------------------------------------
-def render_tab_logs(logs: List[Dict[str, Any]], run_summary: Optional[Dict[str, Any]]) -> None:
+def render_tab_logs(
+    logs: List[Dict[str, Any]],
+    run_summary: Optional[Dict[str, Any]],
+    run_history: Optional[pd.DataFrame] = None,
+) -> None:
     st.subheader("Logs")
 
+    # ── Run history (from DB) ──────────────────────────────────────────────
+    if run_history is not None and not run_history.empty:
+        st.markdown("### Run history")
+        st.dataframe(_make_arrow_safe(run_history), width="stretch")
+    else:
+        st.info("No previous runs found in the database.")
+
+    # ── Current session event log ──────────────────────────────────────────
     if not logs:
-        st.info("No logs yet. Run the analysis first.")
         return
 
     rows = []
@@ -895,7 +903,7 @@ def render_tab_logs(logs: List[Dict[str, Any]], run_summary: Optional[Dict[str, 
 
     df_logs = pd.DataFrame(rows)
     if df_logs.empty:
-        st.info("No visible log events.")
         return
 
+    st.markdown("### Current session events")
     st.dataframe(_make_arrow_safe(df_logs.tail(200)), width="stretch")

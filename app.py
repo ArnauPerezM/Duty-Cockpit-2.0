@@ -6,6 +6,7 @@ from src.logic import (
     run_api_loop,
     postprocess_results,
 )
+from src.db import save_run_results, load_merged_results, get_run_history
 from src.ui import (
     render_sidebar_controls,
     render_hero_header,
@@ -259,6 +260,10 @@ if analyze_clicked:
                         "missing": missing_n,
                         "total_candidates": int(total),
                     }
+                    try:
+                        save_run_results(ok_df, failed_df, None, ref_date, st.session_state.run_summary)
+                    except Exception as db_err:
+                        st.warning(f"DB save failed (cancelled run): {db_err}")
                 else:
                     df_merged = postprocess_results(
                         ok_input_df=st.session_state.df_clean,
@@ -280,6 +285,10 @@ if analyze_clicked:
                         "missing": missing_n,
                         "total_candidates": int(total),
                     }
+                    try:
+                        save_run_results(ok_df, failed_df, df_merged, ref_date, st.session_state.run_summary)
+                    except Exception as db_err:
+                        st.warning(f"DB save failed: {db_err}")
 
             except Exception as e:
                 status.update(label="Execution failed.", state="error")
@@ -303,8 +312,12 @@ with tabs[0]:
 # -------------------------
 # 4) Other tabs
 # -------------------------
+# Always load the full history from DB (current run is already saved before we reach here)
+df_merged_all = load_merged_results()
+run_history_df = get_run_history()
+
 with tabs[1]:
-    render_tab_resultados(df_merged=st.session_state.df_merged, run_summary=st.session_state.run_summary)
+    render_tab_resultados(df_merged=df_merged_all, run_summary=st.session_state.run_summary)
 
 with tabs[2]:
-    render_tab_logs(logs=st.session_state.logs, run_summary=st.session_state.run_summary)
+    render_tab_logs(logs=st.session_state.logs, run_summary=st.session_state.run_summary, run_history=run_history_df)
