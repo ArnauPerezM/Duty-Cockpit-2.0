@@ -206,10 +206,12 @@ def render_hero_header(
     subtitle: str,
     run_state: str,
     meta: Optional[Dict[str, str]] = None,
+    account_label: str = "",
 ) -> None:
     """
     Visual hero header with a status chip + a gradient status bar.
     run_state: "ready" | "blocked" | "running" | "completed" | "failed" | "cancelled"
+    account_label: if set, shown as a secondary chip below the status chip.
     """
     st.markdown(_BASE_CSS, unsafe_allow_html=True)
 
@@ -230,6 +232,17 @@ def render_hero_header(
         if parts:
             meta_line = " | ".join(parts)
 
+    account_chip = ""
+    if account_label and account_label.strip():
+        account_chip = (
+            f'<div style="margin-top:6px; display:inline-flex; align-items:center; gap:6px; '
+            f'padding:4px 10px; border-radius:999px; border:1px solid rgba(194,163,255,0.18); '
+            f'background:rgba(161,0,255,0.08); font-size:11px; color:rgba(255,255,255,0.70);">'
+            f'<span style="opacity:0.7;">&#128100;</span>'
+            f'<span>{_esc(account_label.strip())}</span>'
+            f'</div>'
+        )
+
     html = (
         f'<div class="hero-wrap">'
         f'  <div class="hero-top">'
@@ -239,9 +252,12 @@ def render_hero_header(
         f'        {(" • " + _esc(meta_line)) if meta_line else ""}'
         f'      </div>'
         f'    </div>'
-        f'    <div class="status-chip" style="background:{chip_bg}">'
-        f'      <span class="status-dot" style="background:{dot_color}"></span>'
-        f'      <span><b>{_esc(label)}</b></span>'
+        f'    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
+        f'      <div class="status-chip" style="background:{chip_bg}">'
+        f'        <span class="status-dot" style="background:{dot_color}"></span>'
+        f'        <span><b>{_esc(label)}</b></span>'
+        f'      </div>'
+        f'      {account_chip}'
         f'    </div>'
         f'  </div>'
         f'  <div class="status-bar"><div class="status-bar-fill"></div></div>'
@@ -278,12 +294,6 @@ def render_sidebar_controls() -> Dict[str, Any]:
     )
     ref_date_str = ref_date.strftime("%Y-%m-%d")
 
-    #st.divider()
-    st.subheader("Blocking warnings")
-
-    continue_hs_warning = st.checkbox("Continue even if many HS Codes have < 6 digits", value=False)
-    continue_iso_warning = st.checkbox("Continue even if many COO/COI are not ISO-2", value=False)
-
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
@@ -295,11 +305,82 @@ def render_sidebar_controls() -> Dict[str, Any]:
         "uploaded_file": uploaded_file,
         "sheet_name": sheet_name,
         "ref_date": ref_date_str,
-        "continue_hs_warning": continue_hs_warning,
-        "continue_iso_warning": continue_iso_warning,
         "analyze_clicked": analyze_clicked,
         "cancel_clicked": cancel_clicked,
     }
+
+
+# -----------------------------------------------------------------------------
+# Process tab: inline auth gate
+# -----------------------------------------------------------------------------
+def render_process_auth_gate(existing_label: str = "") -> None:
+    """
+    Inline credential form inside the Process tab.
+    existing_label: pre-fill Account name if previously stored for these credentials.
+    Self-contained: validates against E2Open, saves label to DB, updates session_state.
+    """
+    st.info("Connect to E2Open to enable API execution.", icon="🔒")
+
+    with st.form("e2open_auth", clear_on_submit=False):
+        st.markdown("**E2Open credentials**")
+        environment = st.selectbox("Environment", ["UAT", "PRO"])
+        username = st.text_input("User ID", placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+        password = st.text_input("Password", type="password", placeholder="••••••••••••••••••••")
+        tenant = st.text_input("Tenant ID", placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+        account_name = st.text_input(
+            "Account name",
+            value=existing_label,
+            placeholder="e.g. Accenture UAT",
+            help="A short name shown in the header to identify this connection. Saved for future sessions.",
+        )
+        submitted = st.form_submit_button("Connect to E2Open", type="primary", use_container_width=True)
+
+    if submitted:
+        u = username.strip()
+        p = password
+        t = tenant.strip()
+        env = environment
+        name = account_name.strip()
+        if not u or not p or not t:
+            st.error("User ID, Password and Tenant ID are required.")
+        else:
+            try:
+                from E2Open import E2OpenSession as _E2OpenSession
+                _E2OpenSession(u, p, t, env)
+                _ak = f"{env}:{u}:{t}"
+                from src.db import save_account_label as _save_label, get_account_label as _get_label
+                # Use stored label if user left the field blank (returning user)
+                if not name:
+                    name = _get_label(_ak) or ""
+                if not name:
+                    st.error("Account name is required for first-time connections.")
+                else:
+                    _save_label(_ak, name)
+                    st.session_state.e2open_env = env
+                    st.session_state.e2open_username = u
+                    st.session_state.e2open_password = p
+                    st.session_state.e2open_tenant = t
+                    st.session_state.account_key = _ak
+                    st.session_state.account_label = name
+                    st.session_state.auth_ok = True
+                    st.rerun()
+            except Exception as _e:
+                st.error(f"Authentication failed: {_e}")
+
+
+def render_logout_control() -> bool:
+    """
+    Renders a Logout button in the sidebar. Returns True if clicked.
+    Call this inside a `with st.sidebar:` block (or after sidebar context).
+    """
+    st.divider()
+    return st.button("Logout", use_container_width=True)
+
+
+
+
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -327,7 +408,7 @@ def _make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # KPI cards renderer (icons + delta + sublabels)
 # -----------------------------------------------------------------------------
-def _render_kpi_cards(kpis: List[Dict[str, Any]]) -> None:
+def _render_kpi_cards(kpis: List[Dict[str, Any]], compact: bool = False) -> None:
     """
     Each KPI dict supports:
       - label (str)
@@ -336,11 +417,63 @@ def _render_kpi_cards(kpis: List[Dict[str, Any]]) -> None:
       - icon (str) optional (emoji or short text)
       - delta (str) optional (badge text)
       - delta_kind: "good" | "bad" | "neutral" (optional)
+    compact=True: 6-column single-row layout with reduced padding/font sizes.
     """
     # CSS already injected by render_hero_header(); safe to re-inject once too
     st.markdown(_BASE_CSS, unsafe_allow_html=True)
 
-    parts = ['<div class="kpi-grid">']
+    if compact:
+        n = len(kpis)
+        st.markdown(
+            f"""<style>
+            .kpi-grid-compact {{
+              display: grid;
+              grid-template-columns: repeat({n}, minmax(0, 1fr));
+              gap: 8px;
+            }}
+            .kpi-card-compact {{
+              border-radius: 10px;
+              padding: 8px 10px 6px 10px;
+              background: rgba(255,255,255,0.04);
+              border: 1px solid rgba(255,255,255,0.10);
+              box-shadow: 0 4px 12px rgba(0,0,0,0.20);
+              position: relative;
+              overflow: hidden;
+            }}
+            .kpi-card-compact::before {{
+              content: "";
+              position: absolute;
+              left: 0; top: 0;
+              height: 2px; width: 100%;
+              background: linear-gradient(90deg, {ACCENTURE_PURPLE_DARKEST}, {ACCENTURE_PURPLE_CORE}, {ACCENTURE_PURPLE_LIGHT});
+            }}
+            .kpi-card-compact .kpi-label {{ font-size: 11px; color: rgba(255,255,255,0.65); margin:0; }}
+            .kpi-card-compact .kpi-value {{ font-size: 16px; font-weight: 800; line-height: 1.2; }}
+            .kpi-card-compact .kpi-sub   {{ font-size: 10px; color: rgba(255,255,255,0.50); margin-top:2px; }}
+            .kpi-card-compact .kpi-delta {{
+              margin-top: 5px;
+              display: inline-flex; align-items: center; gap: 4px;
+              padding: 2px 7px; border-radius: 999px;
+              border: 1px solid rgba(194,163,255,0.22);
+              background: rgba(161,0,255,0.10);
+              color: rgba(230,220,255,0.95); font-size: 10px;
+            }}
+            .kpi-card-compact .kpi-delta.bad {{
+              border: 1px solid rgba(255,120,120,0.28);
+              background: rgba(255,60,60,0.12);
+            }}
+            .kpi-card-compact .kpi-delta.good {{
+              border: 1px solid rgba(120,255,200,0.22);
+              background: rgba(40,200,120,0.10);
+            }}
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        parts = ['<div class="kpi-grid-compact">']
+        card_class = "kpi-card-compact"
+    else:
+        parts = ['<div class="kpi-grid">']
+        card_class = "kpi-card"
     for k in kpis:
         label = _esc(k.get("label") or "")
         value = _esc(k.get("value") or "")
@@ -357,7 +490,7 @@ def _render_kpi_cards(kpis: List[Dict[str, Any]]) -> None:
             delta_html = f'<div class="{cls}">{delta}</div>'
 
         parts.append(
-            f'<div class="kpi-card">'
+            f'<div class="{card_class}">'
             f'  <div class="kpi-head">'
             f'    <div class="kpi-label">{label}</div>'
             f'    <div class="kpi-icon">{icon}</div>'
@@ -653,9 +786,6 @@ def render_process_pre(
     df_clean: Optional[pd.DataFrame],
     df_missing: Optional[pd.DataFrame],
     warnings_info: Optional[Dict[str, Any]],
-    continue_hs_warning: bool,
-    continue_iso_warning: bool,
-    warnings_gate_ok: bool,
 ) -> None:
     st.subheader("Input validation")
 
@@ -672,22 +802,14 @@ def render_process_pre(
     if warnings_info is not None and warnings_info.get("warnings"):
         st.warning("\n\n".join(warnings_info["warnings"]))
 
-        blocking_msgs = []
-        if warnings_info.get("hs_ratio_ok") is False and not continue_hs_warning:
-            blocking_msgs.append("Blocked: enable 'Continue' for HS Codes with < 6 digits.")
-        if warnings_info.get("iso_ratio_ok") is False and not continue_iso_warning:
-            blocking_msgs.append("Blocked: enable 'Continue' for non ISO-2 COO/COI.")
-
-        if blocking_msgs:
-            st.error("\n".join(blocking_msgs))
-        else:
-            st.success("Warnings acknowledged. You can run the analysis.")
-
     st.markdown("### Row summary")
 
     candidates = int(len(df_clean)) if df_clean is not None else 0
     missing = int(len(df_missing)) if df_missing is not None else 0
-    gate_ok = warnings_gate_ok
+    hs_ok = warnings_info.get("hs_ratio_ok", True) if warnings_info else True
+    iso_ok = warnings_info.get("iso_ratio_ok", True) if warnings_info else True
+    data_quality = "⚠️ Check warnings" if (not hs_ok or not iso_ok) else "✔ OK"
+    quality_kind = "bad" if (not hs_ok or not iso_ok) else "good"
 
     kpis = [
         {
@@ -699,12 +821,12 @@ def render_process_pre(
             "delta_kind": "neutral",
         },
         {
-            "label": "Warnings gate",
-            "value": "OK" if gate_ok else "BLOCKED",
-            "sub": "Acknowledge blocking warnings to run",
+            "label": "Data quality",
+            "value": data_quality,
+            "sub": "HS codes & COO/COI format",
             "icon": "🛡️",
-            "delta": "You can run now" if gate_ok else "Enable 'Continue' toggles",
-            "delta_kind": "good" if gate_ok else "bad",
+            "delta": "Review warnings above" if (not hs_ok or not iso_ok) else "Ready to run",
+            "delta_kind": quality_kind,
         },
     ]
     _render_kpi_cards(kpis)
@@ -803,8 +925,20 @@ div[data-testid="stMultiSelect"] label p {
 </style>
 """, unsafe_allow_html=True)
 
-def render_tab_resultados(df_merged: Optional[pd.DataFrame], run_summary: Optional[Dict[str, Any]]) -> None:
-    st.subheader("Results dashboard")
+def render_tab_resultados(
+    df_merged: Optional[pd.DataFrame],
+    run_summary: Optional[Dict[str, Any]],
+    df_current_run: Optional[pd.DataFrame] = None,
+    df_failed: Optional[pd.DataFrame] = None,
+    df_missing: Optional[pd.DataFrame] = None,
+    ref_date: str = "",
+    account_label: str = "",
+    environment: str = "",
+) -> None:
+    _hdr_col, _btn_col = st.columns([5, 1])
+    with _hdr_col:
+        st.subheader("Results dashboard")
+    _btn_ph = _btn_col.empty()  # filled later once data is ready
 
     if df_merged is None or df_merged.empty:
         st.info("No results yet. Run the analysis to populate this tab.")
@@ -870,6 +1004,31 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame], run_summary: Option
     ]
     _render_kpi_cards(k2)
 
+    # ── Download Report (top-right placeholder, all visible data) ────────────
+    if not df.empty:
+        from src.logic import build_report_html as _build_report
+        import datetime as _dt
+        _fname = f"duty_report_{ref_date or _dt.date.today().isoformat()}.html"
+        try:
+            _report_bytes = _build_report(
+                df_merged=df,
+                df_failed=df_failed,
+                df_missing=df_missing,
+                run_summary=run_summary,
+                ref_date=ref_date or "",
+                account_label=account_label,
+                environment=environment,
+            )
+            _btn_ph.download_button(
+                label="Download Report",
+                data=_report_bytes,
+                file_name=_fname,
+                mime="text/html",
+                use_container_width=True,
+            )
+        except Exception as _rep_err:
+            _btn_ph.warning(f"Report error: {_rep_err}")
+
     st.markdown("### Results table (filtered)")
     st.dataframe(_make_arrow_safe(df), width="stretch")
 
@@ -881,13 +1040,72 @@ def render_tab_logs(
     logs: List[Dict[str, Any]],
     run_summary: Optional[Dict[str, Any]],
     run_history: Optional[pd.DataFrame] = None,
+    total_queries: int = 0,
 ) -> None:
     st.subheader("Logs")
 
-    # ── Run history (from DB) ──────────────────────────────────────────────
+    # ── Date filter (by execution date) ───────────────────────────────────
+    rh = None
     if run_history is not None and not run_history.empty:
-        st.markdown("### Run history")
-        st.dataframe(_make_arrow_safe(run_history), width="stretch")
+        rh = run_history.copy()
+        rh["_date"] = pd.to_datetime(rh["started_at"], errors="coerce").dt.date
+        min_date = rh["_date"].dropna().min()
+        max_date = rh["_date"].dropna().max()
+
+        if min_date and max_date:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                from_date = st.date_input("Execution date from", value=min_date, min_value=min_date, max_value=max_date, key="log_from")
+            with col_b:
+                to_date = st.date_input("Execution date to", value=max_date, min_value=min_date, max_value=max_date, key="log_to")
+            rh = rh[(rh["_date"] >= from_date) & (rh["_date"] <= to_date)]
+
+    # ── KPIs (computed from filtered run history) ──────────────────────────
+    if rh is not None and not rh.empty:
+        rh_nc = rh[rh["cancelled"] == 0]
+        ok_sum = int(rh_nc["total_ok"].fillna(0).sum())
+        fail_sum = int(rh_nc["total_failed"].fillna(0).sum())
+        miss_sum = int(rh_nc["total_missing"].fillna(0).sum())
+        queries = ok_sum + fail_sum
+        total_runs = len(rh_nc)
+        denom = ok_sum + fail_sum + miss_sum
+        success_rate = ok_sum / denom if denom > 0 else None
+    else:
+        queries = total_queries
+        total_runs = 0
+        success_rate = None
+
+    _render_kpi_cards([
+        {
+            "label": "Total lanes processed",
+            "value": _fmt_int(queries),
+            "icon": "🔢",
+            "sub": "non-cancelled runs (filtered period)",
+        },
+        {
+            "label": "Total Runs",
+            "value": _fmt_int(total_runs),
+            "icon": "▶️",
+            "sub": "completed (non-cancelled)",
+        },
+        {
+            "label": "Success Rate",
+            "value": _fmt_pct(success_rate) if success_rate is not None else "N/A",
+            "icon": "✅",
+            "sub": "ok / (ok + failed + missing)",
+        },
+    ])
+    st.markdown("")
+
+    # ── Run history table ──────────────────────────────────────────────────
+    st.markdown("### Run history")
+    if rh is not None and not rh.empty:
+        _keep = ["id", "ref_date", "started_at", "total_candidates", "total_ok",
+                 "total_failed", "total_missing", "cancelled", "account_key",
+                 "account_label", "environment"]
+        display_cols = [c for c in _keep if c in rh.columns]
+        st.caption(f"{len(rh):,} run(s) shown")
+        st.dataframe(_make_arrow_safe(rh[display_cols]), use_container_width=True)
     else:
         st.info("No previous runs found in the database.")
 
@@ -895,15 +1113,10 @@ def render_tab_logs(
     if not logs:
         return
 
-    rows = []
-    for item in logs:
-        if item.get("event") == "session_output":
-            continue
-        rows.append(item)
-
+    rows = [item for item in logs if item.get("event") != "session_output"]
     df_logs = pd.DataFrame(rows)
     if df_logs.empty:
         return
 
     st.markdown("### Current session events")
-    st.dataframe(_make_arrow_safe(df_logs.tail(200)), width="stretch")
+    st.dataframe(_make_arrow_safe(df_logs.tail(200)), use_container_width=True)
