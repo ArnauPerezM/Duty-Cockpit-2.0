@@ -613,8 +613,9 @@ def _build_country_metrics(
     if df_missing is not None and not df_missing.empty and "coi" in df_missing.columns:
         missing_counts = df_missing.groupby("coi", dropna=False).size().reset_index(name="missing_count")
 
-    customs_sum = pd.DataFrame(columns=["coi", "customs_value_sum_eur"])
-    savings_sum = pd.DataFrame(columns=["coi", "savings_sum"])
+    customs_sum   = pd.DataFrame(columns=["coi", "customs_value_sum_eur"])
+    duty_paid_sum = pd.DataFrame(columns=["coi", "duty_paid_sum"])
+    savings_sum   = pd.DataFrame(columns=["coi", "savings_sum"])
 
     if df_merged is not None and not df_merged.empty and "coi" in df_merged.columns:
         if "customs value" in df_merged.columns:
@@ -622,23 +623,29 @@ def _build_country_metrics(
             tmp["customs value"] = pd.to_numeric(tmp["customs value"], errors="coerce").fillna(0.0)
             customs_sum = tmp.groupby("coi", dropna=False)["customs value"].sum().reset_index(name="customs_value_sum_eur")
 
-        if "Default Duties" in df_merged.columns and "Minimum Duties" in df_merged.columns:
+        if "duty paid" in df_merged.columns:
             tmp = df_merged.copy()
-            tmp["Default Duties"] = pd.to_numeric(tmp["Default Duties"], errors="coerce").fillna(0.0)
+            tmp["duty paid"] = pd.to_numeric(tmp["duty paid"], errors="coerce").fillna(0.0)
+            duty_paid_sum = tmp.groupby("coi", dropna=False)["duty paid"].sum().reset_index(name="duty_paid_sum")
+
+        if "duty paid" in df_merged.columns and "Minimum Duties" in df_merged.columns:
+            tmp = df_merged.copy()
+            tmp["duty paid"]      = pd.to_numeric(tmp["duty paid"],      errors="coerce").fillna(0.0)
             tmp["Minimum Duties"] = pd.to_numeric(tmp["Minimum Duties"], errors="coerce").fillna(0.0)
-            tmp["savings"] = tmp["Default Duties"] - tmp["Minimum Duties"]
+            tmp["savings"] = tmp["duty paid"] - tmp["Minimum Duties"]
             savings_sum = tmp.groupby("coi", dropna=False)["savings"].sum().reset_index(name="savings_sum")
 
     df = ok_counts.merge(failed_counts, on="coi", how="outer")
     df = df.merge(missing_counts, on="coi", how="outer")
-    df = df.merge(customs_sum, on="coi", how="outer")
-    df = df.merge(savings_sum, on="coi", how="outer")
+    df = df.merge(customs_sum,    on="coi", how="outer")
+    df = df.merge(duty_paid_sum,  on="coi", how="outer")
+    df = df.merge(savings_sum,    on="coi", how="outer")
 
     for col in ["ok_count", "failed_count", "missing_count"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    for col in ["customs_value_sum_eur", "savings_sum"]:
+    for col in ["customs_value_sum_eur", "duty_paid_sum", "savings_sum"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
@@ -663,6 +670,7 @@ def _render_country_map_and_top10(metrics_df: pd.DataFrame) -> None:
 
     options = [
         "Customs value (EUR)",
+        "Duties paid (EUR)",
         "Potential savings (EUR)",
         "% failed/missing rows by COI",
     ]
@@ -683,6 +691,12 @@ def _render_country_map_and_top10(metrics_df: pd.DataFrame) -> None:
         top_df = metrics_df.sort_values(value_col, ascending=False)[["coi_iso2", value_col]].head(10)
         top_df = top_df.rename(columns={"coi_iso2": "COI", value_col: "Customs value (EUR)"})
         top_money_cols = ["Customs value (EUR)"]
+    elif choice == "Duties paid (EUR)":
+        value_col = "duty_paid_sum"
+        title = "Duties Paid (EUR) by COI"
+        top_df = metrics_df.sort_values(value_col, ascending=False)[["coi_iso2", value_col]].head(10)
+        top_df = top_df.rename(columns={"coi_iso2": "COI", value_col: "Duties paid (EUR)"})
+        top_money_cols = ["Duties paid (EUR)"]
     elif choice == "Potential savings (EUR)":
         value_col = "savings_sum"
         title = "Potential savings (EUR) by COI"
@@ -974,33 +988,31 @@ def render_tab_resultados(
 
     st.markdown("### KPIs")
 
-    min_duties = pd.to_numeric(df.get("Minimum Duties", pd.Series([0] * len(df))), errors="coerce") if "Minimum Duties" in df.columns else None
-    def_duties = pd.to_numeric(df.get("Default Duties", pd.Series([0] * len(df))), errors="coerce") if "Default Duties" in df.columns else None
-    customs_val = pd.to_numeric(df.get("customs value", pd.Series([0] * len(df))), errors="coerce") if "customs value" in df.columns else None
+    min_duties  = pd.to_numeric(df.get("Minimum Duties", pd.Series([0] * len(df))), errors="coerce") if "Minimum Duties" in df.columns else None
+    def_duties  = pd.to_numeric(df.get("Default Duties", pd.Series([0] * len(df))), errors="coerce") if "Default Duties" in df.columns else None
+    customs_val = pd.to_numeric(df.get("customs value",  pd.Series([0] * len(df))), errors="coerce") if "customs value"  in df.columns else None
+    duty_paid   = pd.to_numeric(df.get("duty paid",      pd.Series([0] * len(df))), errors="coerce") if "duty paid"      in df.columns else None
 
-    min_sum = float(min_duties.fillna(0).sum()) if min_duties is not None else None
-    def_sum = float(def_duties.fillna(0).sum()) if def_duties is not None else None
-    savings_total = float((def_duties.fillna(0) - min_duties.fillna(0)).sum()) if (def_duties is not None and min_duties is not None) else None
-
-    effective_rate = None
-    if customs_val is not None and min_duties is not None:
-        denom = float(customs_val.fillna(0).sum())
-        effective_rate = (min_sum / denom) if denom > 0 else None
+    customs_sum   = float(customs_val.fillna(0).sum()) if customs_val is not None else None
+    min_sum       = float(min_duties.fillna(0).sum())  if min_duties  is not None else None
+    def_sum       = float(def_duties.fillna(0).sum())  if def_duties  is not None else None
+    paid_sum      = float(duty_paid.fillna(0).sum())   if duty_paid   is not None else None
+    savings_total = float((duty_paid.fillna(0) - min_duties.fillna(0)).sum()) if (duty_paid is not None and min_duties is not None) else None
 
     k1 = [
-        {"label": "Filtered rows", "value": _fmt_int(len(df)), "sub": "Current scope", "icon": "🔎"},
-        {"label": "Distinct COI", "value": _fmt_int(df["coi"].nunique() if "coi" in df.columns else 0), "sub": "Geographic coverage", "icon": "🌍"},
-        {"label": "Distinct HS", "value": _fmt_int(df["hs code"].nunique() if "hs code" in df.columns else 0), "sub": "Classification breadth", "icon": "🏷️"},
-        {"label": "Effective rate", "value": _fmt_pct(effective_rate), "sub": "Minimum / Customs", "icon": "📈"},
+        {"label": "Filtered rows",      "value": _fmt_int(len(df)), "sub": "Current scope", "icon": "🔎"},
+        {"label": "Distinct COI",       "value": _fmt_int(df["coi"].nunique() if "coi" in df.columns else 0), "sub": "Geographic coverage", "icon": "🌍"},
+        {"label": "Distinct HS",        "value": _fmt_int(df["hs code"].nunique() if "hs code" in df.columns else 0), "sub": "Classification breadth", "icon": "🏷️"},
+        {"label": "Customs Value (EUR)", "value": _fmt_num(customs_sum) + " €", "sub": "Sum of customs value", "icon": "💶"},
     ]
     _render_kpi_cards(k1)
 
     st.markdown("")
     k2 = [
-        {"label": "Customs Value (EUR)", "value": _fmt_num(float(customs_val.fillna(0).sum()) if customs_val is not None else None) + " €", "sub": "Sum of customs value", "icon": "💶"},
-        {"label": "Default Duties (EUR)", "value": _fmt_num(def_sum) + " €", "sub": "Sum of default duties", "icon": "📄"},
-        {"label": "Minimum Duties (EUR)", "value": _fmt_num(min_sum) + " €", "sub": "Sum of minimum duties", "icon": "🧾"},
-        {"label": "Potential savings (EUR)", "value": _fmt_num(savings_total) + " €", "sub": "Default - Minimum duties", "icon": "💡"},
+        {"label": "Duties Paid (EUR)",     "value": _fmt_num(paid_sum)      + " €", "sub": "Sum of duties paid",      "icon": "💳"},
+        {"label": "Default Duties (EUR)",  "value": _fmt_num(def_sum)       + " €", "sub": "Sum of default duties",   "icon": "📄"},
+        {"label": "Minimum Duties (EUR)",  "value": _fmt_num(min_sum)       + " €", "sub": "Sum of minimum duties",   "icon": "🧾"},
+        {"label": "Potential Savings (EUR)", "value": _fmt_num(savings_total) + " €", "sub": "Duties Paid - Minimum", "icon": "💡"},
     ]
     _render_kpi_cards(k2)
 

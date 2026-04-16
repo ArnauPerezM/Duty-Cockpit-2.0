@@ -1,0 +1,13 @@
+[global]
+# Disable dev mode so Streamlit serves its own bundled static files.
+# Without this, Streamlit proxies the frontend to localhost:3000 (React dev
+# server) which does not exist in a frozen exe, causing a 404 on every request.
+developmentMode = false
+
+[server]
+headless = true
+port = 8501
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

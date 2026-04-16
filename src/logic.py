@@ -678,14 +678,16 @@ def build_report_html(
     # ── KPIs ─────────────────────────────────────────────────────────────────
     df = df_merged.copy() if df_merged is not None and not df_merged.empty else pd.DataFrame()
 
-    customs_val = pd.to_numeric(df.get("customs value", pd.Series(dtype=float)), errors="coerce").fillna(0)
-    min_duties  = pd.to_numeric(df.get("Minimum Duties",  pd.Series(dtype=float)), errors="coerce").fillna(0)
-    def_duties  = pd.to_numeric(df.get("Default Duties",  pd.Series(dtype=float)), errors="coerce").fillna(0)
+    customs_val = pd.to_numeric(df.get("customs value",  pd.Series(dtype=float)), errors="coerce").fillna(0)
+    min_duties  = pd.to_numeric(df.get("Minimum Duties", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    def_duties  = pd.to_numeric(df.get("Default Duties", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    duty_paid   = pd.to_numeric(df.get("duty paid",      pd.Series(dtype=float)), errors="coerce").fillna(0)
 
     customs_sum = float(customs_val.sum())
     min_sum     = float(min_duties.sum())
     def_sum     = float(def_duties.sum())
-    savings     = def_sum - min_sum
+    paid_sum    = float(duty_paid.sum())
+    savings     = paid_sum - min_sum
     eff_rate    = (min_sum / customs_sum * 100) if customs_sum > 0 else None
 
     # Lane count always from the data (report may cover multiple runs)
@@ -724,10 +726,10 @@ def build_report_html(
     top_hs          = pd.DataFrame()
 
     if not df.empty:
-        if {"coi", "Default Duties", "Minimum Duties"}.issubset(df.columns):
+        if {"coi", "duty paid", "Minimum Duties"}.issubset(df.columns):
             tmp = df.copy()
             tmp["_sav"] = (
-                pd.to_numeric(tmp["Default Duties"], errors="coerce").fillna(0)
+                pd.to_numeric(tmp["duty paid"],      errors="coerce").fillna(0)
                 - pd.to_numeric(tmp["Minimum Duties"], errors="coerce").fillna(0)
             )
             top_coi_savings = (
@@ -849,10 +851,10 @@ def build_report_html(
         f"for reference date <strong>{_e(ref_date)}</strong>. "
         f"A total of <strong>{_int(ok_n)} lane(s)</strong> are included in this report"
         f"{fail_txt}. "
-        f"The total customs value analysed amounts to <strong>{_eur(customs_sum)}</strong>, "
-        f"with a potential duty saving of <strong>{_eur(savings)}</strong> by applying "
-        f"the most favourable program instead of the default MFN rate "
-        f"(effective rate: <strong>{_pct(eff_rate)}</strong>)."
+        f"The total customs value analysed amounts to <strong>{_eur(customs_sum)}</strong>. "
+        f"Duties actually paid total <strong>{_eur(paid_sum)}</strong>, with a potential saving of "
+        f"<strong>{_eur(savings)}</strong> by applying the most favourable program instead of the rates paid "
+        f"(effective rate on minimum duties: <strong>{_pct(eff_rate)}</strong>)."
     )
 
     # ── Inline CSS ────────────────────────────────────────────────────────────
@@ -878,7 +880,7 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f2f8; color: #
 }
 .section h3 { font-size: 13.5px; font-weight: 600; color: #7500C0; margin: 16px 0 10px; }
 
-.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .kpi-card {
   background: #faf5ff; border: 1px solid #e6dcff;
   border-radius: 10px; padding: 14px 16px; border-top: 3px solid #A100FF;
@@ -993,6 +995,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
       <div class="kpi-sub">EUR equivalent</div>
     </div>
     <div class="kpi-card">
+      <div class="kpi-label">Duties Paid</div>
+      <div class="kpi-value">{_eur(paid_sum)}</div>
+      <div class="kpi-sub">EUR equivalent</div>
+    </div>
+    <div class="kpi-card">
       <div class="kpi-label">Default Duties</div>
       <div class="kpi-value">{_eur(def_sum)}</div>
       <div class="kpi-sub">MFN / Default program</div>
@@ -1005,7 +1012,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <div class="kpi-card">
       <div class="kpi-label">Potential Savings</div>
       <div class="kpi-value good">{_eur(savings)}</div>
-      <div class="kpi-sub">Default &minus; Minimum duties</div>
+      <div class="kpi-sub">Duties Paid &minus; Minimum duties</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Effective Duty Rate</div>
