@@ -1042,7 +1042,960 @@ def render_tab_resultados(
             _btn_ph.warning(f"Report error: {_rep_err}")
 
     st.markdown("### Results table (filtered)")
-    st.dataframe(_make_arrow_safe(df), width="stretch")
+
+    # ── View / Edit mode toggle ───────────────────────────────────────────────
+    edit_mode = st.session_state.get("db_edit_mode", "view")
+    if edit_mode == "view":
+        st.dataframe(_make_arrow_safe(df), use_container_width=True)
+    # Inline editor and corrections are rendered by render_db_editor_section
+    render_db_editor_section(df_merged=df_merged, df_filtered=df)
+
+
+# -----------------------------------------------------------------------------
+# DB editor section (inline + Excel corrections)
+# -----------------------------------------------------------------------------
+
+# Columns shown to the user but not editable
+_EDITOR_READONLY_COLS = [
+    "invoice number", "material number", "date", "ref_date", "status",
+    "calcName", "incoCalcBasis", "Input Date",
+    "Min Duty Program", "Min Duty Rate", "Min Duty Program Description",
+    "Minimum Duties", "Currency Min Duties",
+    "Default Duty Program", "Default Duty Rate", "Default Duty Program Description",
+    "Default Duties", "Currency Default Duties",
+]
+# Columns hidden entirely from the editor grid
+_EDITOR_HIDDEN_COLS = ["run_id", "ref_date", "saved_at"]
+
+
+def render_db_editor_section(
+    df_merged: pd.DataFrame,
+    df_filtered: pd.DataFrame,
+) -> None:
+    """
+    Renders the DB editor section below the results table.
+
+    Offers two correction paths:
+    1. Inline editing via st.data_editor with diff/confirm step.
+    2. Excel roundtrip: export → edit offline → import with diff/confirm.
+
+    Uses st.session_state keys:
+      db_edit_mode       : "view" | "inline" | "inline_review" | "corrections_review"
+      db_editor_base_df  : df used as starting point for inline editor
+      db_inline_changes  : list[dict] — computed inline update diff
+      db_inline_deletes  : list[int]  — ids to delete from inline editor
+      db_corrections_diff: dict       — diff from Excel corrections parse
+      db_corrections_errors: list[str]
+    """
+    from src.db import update_merged_rows, delete_merged_rows, EDITABLE_COL_DF_TO_DB
+    from src.logic import export_merged_to_excel, parse_corrections_excel
+
+    edit_mode = st.session_state.get("db_edit_mode", "view")
+
+    st.markdown("---")
+    st.markdown("#### Edit / Correct Records")
+
+    # ── Action bar ────────────────────────────────────────────────────────────
+    if edit_mode == "view":
+        col_a, col_b, col_c = st.columns([2, 2, 3])
+
+        with col_a:
+            if st.button("Edit inline", key="db_btn_edit_inline", use_container_width=True):
+                # Prepare the editor df: add _delete col, keep id hidden
+                base = df_filtered.copy()
+                base.insert(0, "_delete", False)
+                st.session_state.db_editor_base_df = base
+                st.session_state.db_edit_mode = "inline"
+                st.rerun()
+
+        with col_b:
+            # Excel export of the filtered view
+            if "id" in df_filtered.columns and not df_filtered.empty:
+                import datetime as _dt
+                _xls_bytes = export_merged_to_excel(df_filtered)
+                st.download_button(
+                    label="Download Excel (corrections)",
+                    data=_xls_bytes,
+                    file_name=f"corrections_{_dt.date.today().isoformat()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="db_btn_download_xls",
+                )
+
+        with col_c:
+            corr_file = st.file_uploader(
+                "Import corrections (.xlsx)",
+                type=["xlsx"],
+                key="db_corrections_uploader",
+                label_visibility="collapsed",
+            )
+            if corr_file is not None:
+                diff, errors = parse_corrections_excel(corr_file, df_merged)
+                st.session_state.db_corrections_diff = diff
+                st.session_state.db_corrections_errors = errors
+                if diff is not None:
+                    st.session_state.db_edit_mode = "corrections_review"
+                    st.rerun()
+                else:
+                    for err in errors:
+                        st.error(err)
+
+    # ── Inline editor ─────────────────────────────────────────────────────────
+    elif edit_mode == "inline":
+        st.info(
+            "Edit cells directly. Check **_delete** to mark a row for deletion. "
+            "Grey columns are read-only."
+        )
+
+        base_df = st.session_state.get("db_editor_base_df", df_filtered)
+
+        # Build column config: hide internal cols, lock read-only cols, configure editable ones
+        col_cfg: dict = {}
+        for col in _EDITOR_HIDDEN_COLS + ["id"]:
+            col_cfg[col] = None  # hidden
+        col_cfg["_delete"] = st.column_config.CheckboxColumn(
+            "Delete", default=False, width="small"
+        )
+        for col in _EDITOR_READONLY_COLS:
+            if col in base_df.columns:
+                col_cfg[col] = st.column_config.TextColumn(col, disabled=True)
+        # Numeric editable columns
+        for num_col, fmt in [
+            ("customs value", "%.2f"), ("weight", "%.4f"), ("duty paid", "%.2f"),
+        ]:
+            if num_col in base_df.columns:
+                col_cfg[num_col] = st.column_config.NumberColumn(num_col, format=fmt)
+
+        edited_df = st.data_editor(
+            _make_arrow_safe(base_df),
+            column_config=col_cfg,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            key="db_inline_editor",
+        )
+
+        btn_col1, btn_col2 = st.columns([2, 1])
+        with btn_col1:
+            btn_review = st.button(
+                "Review changes", type="primary", key="db_btn_review_inline"
+            )
+        with btn_col2:
+            btn_cancel = st.button("Cancel", key="db_btn_cancel_inline")
+
+        if btn_cancel:
+            st.session_state.db_edit_mode = "view"
+            st.session_state.db_editor_base_df = None
+            st.rerun()
+
+        if btn_review:
+            # Compute diff between base and edited
+            editable_df_cols = list(EDITABLE_COL_DF_TO_DB.keys())
+            changes: list = []
+            deletes: list = []
+
+            # Align by position (data_editor returns same row order)
+            base_arr = base_df.reset_index(drop=True)
+            edit_arr = edited_df.reset_index(drop=True)
+
+            for i in range(len(base_arr)):
+                if i >= len(edit_arr):
+                    break
+                b_row = base_arr.iloc[i]
+                e_row = edit_arr.iloc[i]
+                row_id = b_row.get("id")
+
+                # Delete flagged rows
+                if e_row.get("_delete") is True or e_row.get("_delete") == 1:
+                    if row_id is not None:
+                        deletes.append(int(row_id))
+                    continue
+
+                # Detect editable column changes
+                row_diff: dict = {"id": row_id}
+                for df_col, db_col in EDITABLE_COL_DF_TO_DB.items():
+                    if df_col not in b_row.index or df_col not in e_row.index:
+                        continue
+                    from src.logic import _corr_vals_equal, _coerce_correction
+                    if not _corr_vals_equal(b_row[df_col], e_row[df_col]):
+                        row_diff[db_col] = _coerce_correction(e_row[df_col], db_col)
+
+                if len(row_diff) > 1:
+                    changes.append(row_diff)
+
+            st.session_state.db_editor_base_df = edited_df  # preserve for "back"
+            st.session_state.db_inline_changes = changes
+            st.session_state.db_inline_deletes = deletes
+            st.session_state.db_edit_mode = "inline_review"
+            st.rerun()
+
+    # ── Inline review / confirm ───────────────────────────────────────────────
+    elif edit_mode == "inline_review":
+        changes = st.session_state.get("db_inline_changes", [])
+        deletes = st.session_state.get("db_inline_deletes", [])
+
+        if not changes and not deletes:
+            st.info("No changes detected compared to the current DB state.")
+        else:
+            if changes:
+                st.markdown(f"**{len(changes)} row(s) with changes:**")
+                # Build preview df with old→new format
+                from src.db import EDITABLE_COL_DF_TO_DB as _cmap
+                _db_to_df = {v: k for k, v in _cmap.items()}
+                preview_rows = []
+                for ch in changes:
+                    row = {"id": ch["id"]}
+                    for db_col, new_val in ch.items():
+                        if db_col == "id":
+                            continue
+                        df_col = _db_to_df.get(db_col, db_col)
+                        row[df_col] = new_val
+                    preview_rows.append(row)
+                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+
+            if deletes:
+                st.markdown(f"**{len(deletes)} row(s) to delete** (IDs: {deletes})")
+
+        rc1, rc2, rc3 = st.columns([2, 2, 1])
+        with rc1:
+            btn_apply = st.button(
+                "Apply changes", type="primary", key="db_btn_apply_inline",
+                disabled=(not changes and not deletes),
+            )
+        with rc2:
+            btn_back = st.button("Back to editor", key="db_btn_back_inline")
+        with rc3:
+            btn_cancel2 = st.button("Cancel", key="db_btn_cancel_review")
+
+        if btn_cancel2:
+            st.session_state.db_edit_mode = "view"
+            st.session_state.db_editor_base_df = None
+            st.rerun()
+
+        if btn_back:
+            st.session_state.db_edit_mode = "inline"
+            st.rerun()
+
+        if btn_apply:
+            n_upd = update_merged_rows(changes) if changes else 0
+            n_del = delete_merged_rows(deletes) if deletes else 0
+            st.session_state.db_edit_mode = "view"
+            st.session_state.db_editor_base_df = None
+            st.session_state.db_inline_changes = None
+            st.session_state.db_inline_deletes = None
+            st.success(f"Changes applied: {n_upd} updated, {n_del} deleted.")
+            st.rerun()
+
+    # ── Excel corrections review / confirm ────────────────────────────────────
+    elif edit_mode == "corrections_review":
+        diff = st.session_state.get("db_corrections_diff")
+        errors = st.session_state.get("db_corrections_errors", [])
+
+        for err in errors:
+            st.warning(err)
+
+        if diff is None:
+            st.error("No valid corrections to display.")
+        else:
+            updates = diff.get("updates", [])
+            deletes = diff.get("deletes", [])
+            upd_preview: pd.DataFrame = diff.get("update_preview", pd.DataFrame())
+            del_preview: pd.DataFrame = diff.get("delete_preview", pd.DataFrame())
+
+            if updates:
+                st.markdown(f"**{len(updates)} row(s) with detected changes:**")
+                st.dataframe(
+                    _make_arrow_safe(upd_preview), use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No changes detected in editable columns.")
+
+            if deletes:
+                st.markdown(f"**{len(deletes)} row(s) marked for deletion:**")
+                if not del_preview.empty:
+                    st.dataframe(
+                        _make_arrow_safe(del_preview), use_container_width=True, hide_index=True
+                    )
+
+            if not updates and not deletes:
+                st.info("The file contains no changes compared to the current DB.")
+
+            ec1, ec2 = st.columns([2, 1])
+            with ec1:
+                btn_apply_xls = st.button(
+                    "Apply corrections",
+                    type="primary",
+                    key="db_btn_apply_xls",
+                    disabled=(not updates and not deletes),
+                )
+            with ec2:
+                btn_cancel_xls = st.button("Cancel", key="db_btn_cancel_xls")
+
+            if btn_cancel_xls:
+                st.session_state.db_edit_mode = "view"
+                st.session_state.db_corrections_diff = None
+                st.rerun()
+
+            if btn_apply_xls:
+                n_upd = update_merged_rows(updates) if updates else 0
+                n_del = delete_merged_rows(deletes) if deletes else 0
+                st.session_state.db_edit_mode = "view"
+                st.session_state.db_corrections_diff = None
+                st.session_state.db_corrections_errors = None
+                st.success(f"Corrections applied: {n_upd} updated, {n_del} deleted.")
+                st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# Opportunities tab
+# -----------------------------------------------------------------------------
+def render_tab_opportunities(
+    df_merged: Optional[pd.DataFrame],
+    df_initiatives: Optional[pd.DataFrame] = None,
+) -> None:
+    st.subheader("Opportunities dashboard")
+
+    if df_merged is None or df_merged.empty:
+        st.info("No results yet. Run the analysis to populate this tab.")
+        return
+
+    df = df_merged.copy()
+    for col in ["coo", "coi", "hs code"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    st.markdown("### Filters")
+    c1, c2, c3 = st.columns([1, 1, 1.2])
+    coo_opts = sorted(df["coo"].dropna().unique().tolist()) if "coo" in df.columns else []
+    coi_opts = sorted(df["coi"].dropna().unique().tolist()) if "coi" in df.columns else []
+    hs_opts  = sorted(df["hs code"].dropna().unique().tolist()) if "hs code" in df.columns else []
+
+    with c1:
+        coo_sel = st.multiselect("COO", options=coo_opts, default=[], key="opp_coo")
+    with c2:
+        coi_sel = st.multiselect("COI", options=coi_opts, default=[], key="opp_coi")
+    with c3:
+        hs_sel = st.multiselect("HS Code", options=hs_opts, default=[], key="opp_hs")
+
+    if coo_sel and "coo" in df.columns:
+        df = df[df["coo"].isin(coo_sel)]
+    if coi_sel and "coi" in df.columns:
+        df = df[df["coi"].isin(coi_sel)]
+    if hs_sel and "hs code" in df.columns:
+        df = df[df["hs code"].isin(hs_sel)]
+
+    st.caption(f"Rows after filters: {len(df):,} / {len(df_merged):,}")
+
+    # ── Derived numeric columns ───────────────────────────────────────────────
+    def _n(col):
+        return pd.to_numeric(df[col], errors="coerce").fillna(0.0) if col in df.columns else pd.Series([0.0] * len(df), index=df.index)
+
+    df = df.copy()
+    df["_customs"]    = _n("customs value")
+    df["_duty_paid"]  = _n("duty paid")
+    df["_def_duties"] = _n("Default Duties")
+    df["_min_duties"] = _n("Minimum Duties")
+    df["_overpaid"]   = df["_duty_paid"] - df["_min_duties"]
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    n_transactions  = len(df)
+    n_opportunities = int((df["_overpaid"] > 0).sum())
+    customs_total   = float(df["_customs"].sum())
+    duty_exposure   = float(df["_def_duties"].sum())
+    duty_paid_total = float(df["_duty_paid"].sum())
+    overpaid_total  = float(df["_overpaid"].clip(lower=0).sum())
+
+    st.markdown("### KPIs")
+    _render_kpi_cards([
+        {"label": "# Transactions",   "value": _fmt_int(n_transactions),             "icon": "🧾", "sub": "Total filtered rows"},
+        {"label": "# Opportunities",  "value": _fmt_int(n_opportunities),            "icon": "💡", "sub": "Rows with overpaid duties"},
+        {"label": "Customs Value",    "value": _fmt_num(customs_total)   + " €", "icon": "💶", "sub": "Sum of customs value"},
+        {"label": "Duty Exposure",    "value": _fmt_num(duty_exposure)   + " €", "icon": "📄", "sub": "Sum of default duties"},
+        {"label": "Duty Paid",        "value": _fmt_num(duty_paid_total) + " €", "icon": "💳", "sub": "Sum of duties paid"},
+        {"label": "Overpaid Duties",  "value": _fmt_num(overpaid_total)  + " €", "icon": "⚠️", "sub": "Duty Paid – Min Duties"},
+    ], compact=True)
+
+    st.markdown("")
+
+    # ── Column detection ──────────────────────────────────────────────────────
+    prod_col = next((c for c in ["product", "material number", "material"] if c in df.columns), None)
+    prog_col = next(
+        (c for c in ["Min Duty Program Description", "Min Duty Program", "min duty program description"] if c in df.columns),
+        None,
+    )
+
+    # ── 4 charts in a row ─────────────────────────────────────────────────────
+    _CHART_LAYOUT = dict(
+        height=310,
+        margin=dict(l=0, r=8, t=10, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+        xaxis=dict(ticksuffix=" €", tickfont=dict(size=10), gridcolor="rgba(255,255,255,0.07)"),
+        yaxis=dict(tickfont=dict(size=10), gridcolor="rgba(255,255,255,0.07)"),
+    )
+
+    ch1, ch2, ch3, ch4 = st.columns(4)
+
+    # 1 — Overpaid Duties by Product
+    with ch1:
+        st.markdown("**Overpaid Duties by Product**")
+        if prod_col:
+            grp = (
+                df.groupby(prod_col)["_overpaid"].sum()
+                .reset_index()
+                .pipe(lambda d: d[d["_overpaid"] > 0])
+                .sort_values("_overpaid", ascending=True)
+                .tail(10)
+            )
+            if not grp.empty:
+                fig = px.bar(
+                    grp, x="_overpaid", y=prod_col, orientation="h",
+                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE],
+                    template="plotly_dark",
+                )
+                fig.update_layout(**_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No overpaid duties found.")
+        else:
+            st.info("No product column in data.")
+
+    # 2 — Overpaid Duties by COI (stacked by program if available)
+    with ch2:
+        st.markdown("**Overpaid Duties by COI**")
+        if "coi" in df.columns:
+            if prog_col:
+                grp = (
+                    df.groupby(["coi", prog_col])["_overpaid"].sum()
+                    .reset_index()
+                    .pipe(lambda d: d[d["_overpaid"] > 0])
+                )
+                order = (
+                    df.groupby("coi")["_overpaid"].sum()
+                    .reset_index()
+                    .pipe(lambda d: d[d["_overpaid"] > 0])
+                    .sort_values("_overpaid", ascending=True)["coi"]
+                    .tolist()
+                )
+            else:
+                grp = (
+                    df.groupby("coi")["_overpaid"].sum()
+                    .reset_index()
+                    .pipe(lambda d: d[d["_overpaid"] > 0])
+                    .sort_values("_overpaid", ascending=True)
+                )
+                order = grp["coi"].tolist()
+                prog_col_used = None
+
+            if not grp.empty:
+                color_arg = prog_col if prog_col else None
+                fig = px.bar(
+                    grp, x="_overpaid", y="coi", orientation="h",
+                    color=color_arg,
+                    color_discrete_sequence=[
+                        ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT,
+                        ACCENTURE_PURPLE_DARK, ACCENTURE_PURPLE_DARKEST,
+                        ACCENTURE_PURPLE_LIGHTEST,
+                    ],
+                    template="plotly_dark",
+                    category_orders={"coi": order},
+                )
+                fig.update_layout(**_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No overpaid duties found.")
+        else:
+            st.info("No COI column in data.")
+
+    # 3 — Overpaid Duties by Trade Lane (styled table)
+    with ch3:
+        st.markdown("**Overpaid Duties by Trade Lane**")
+        if "coi" in df.columns and "coo" in df.columns:
+            lane = (
+                df.groupby(["coi", "coo"])["_overpaid"].sum()
+                .reset_index()
+                .pipe(lambda d: d[d["_overpaid"] > 0])
+                .sort_values("_overpaid", ascending=False)
+                .head(15)
+                .rename(columns={"coi": "COI", "coo": "COO", "_overpaid": "Overpaid Duties"})
+            )
+            if not lane.empty:
+                st.dataframe(
+                    lane,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=320,
+                    column_config={
+                        "Overpaid Duties": st.column_config.NumberColumn(
+                            "Overpaid Duties", format="%.2f €"
+                        )
+                    },
+                )
+            else:
+                st.info("No overpaid duties found.")
+        else:
+            st.info("No COI/COO columns in data.")
+
+    # 4 — Overpaid Duties by Program
+    with ch4:
+        st.markdown("**Overpaid Duties by Program**")
+        if prog_col:
+            grp = (
+                df.groupby(prog_col)["_overpaid"].sum()
+                .reset_index()
+                .pipe(lambda d: d[d["_overpaid"] > 0])
+                .sort_values("_overpaid", ascending=True)
+                .tail(10)
+            )
+            if not grp.empty:
+                fig = px.bar(
+                    grp, x="_overpaid", y=prog_col, orientation="h",
+                    color_discrete_sequence=[ACCENTURE_PURPLE_LIGHT],
+                    template="plotly_dark",
+                )
+                fig.update_layout(**_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No overpaid duties found.")
+        else:
+            st.info("No program column in data.")
+
+    # ── Build initiative lookup (coo, coi, hs_code) → status list ────────────
+    _ini_lookup: Dict[tuple, List[str]] = {}
+    if df_initiatives is not None and not df_initiatives.empty:
+        for _, _ir in df_initiatives.iterrows():
+            _k = (
+                str(_ir.get("coo", "") or "").strip().upper(),
+                str(_ir.get("coi", "") or "").strip().upper(),
+                str(_ir.get("hs_code", "") or "").strip().upper(),
+            )
+            _ini_lookup.setdefault(_k, []).append(str(_ir.get("status", "") or ""))
+
+    def _ini_label(row) -> str:
+        k = (
+            str(row.get("coo", "") or "").strip().upper(),
+            str(row.get("coi", "") or "").strip().upper(),
+            str(row.get("hs code", "") or "").strip().upper(),
+        )
+        statuses = _ini_lookup.get(k, [])
+        if not statuses:
+            return ""
+        return "✓ " + " / ".join(sorted(set(statuses)))
+
+    # ── Grouped table with row selection ──────────────────────────────────────
+    st.markdown("### Opportunities table (grouped by COO · COI · HS Code)")
+    st.caption("Check rows and click **Create Initiative** to promote them.")
+
+    group_cols = [c for c in ["coo", "coi", "hs code"] if c in df.columns]
+
+    agg: Dict[str, Any] = {
+        "_customs":    "sum",
+        "_duty_paid":  "sum",
+        "_def_duties": "sum",
+        "_min_duties": "sum",
+        "_overpaid":   "sum",
+    }
+    if prod_col:
+        agg[prod_col] = "first"
+    if prog_col:
+        agg[prog_col] = lambda x: ", ".join(x.dropna().astype(str).unique()[:2])
+    for extra in ["Default Duty Rate", "Min Duty Rate"]:
+        if extra in df.columns:
+            agg[extra] = "first"
+
+    grouped = (
+        df.groupby(group_cols)
+        .agg(agg)
+        .reset_index()
+        .rename(columns={
+            "_customs":    "Customs Value",
+            "_duty_paid":  "Duty Paid",
+            "_def_duties": "Default Duties",
+            "_min_duties": "Duty To-Be Paid",
+            "_overpaid":   "Overpaid Duties",
+        })
+        .sort_values("Overpaid Duties", ascending=False)
+    )
+
+    # Indicator column: shows existing initiative status or blank
+    grouped["Initiative"] = grouped.apply(_ini_label, axis=1)
+
+    grouped_sel = grouped.copy()
+    grouped_sel.insert(0, "_select", False)
+
+    money_cfg = {
+        "_select":    st.column_config.CheckboxColumn("Select", default=False, width="small"),
+        "Initiative": st.column_config.TextColumn("Initiative", disabled=True, width="medium"),
+        **{
+            c: st.column_config.NumberColumn(c, format="%.2f €")
+            for c in ["Customs Value", "Duty Paid", "Default Duties", "Duty To-Be Paid", "Overpaid Duties"]
+            if c in grouped_sel.columns
+        },
+    }
+
+    edited_opp = st.data_editor(
+        _make_arrow_safe(grouped_sel),
+        use_container_width=True,
+        column_config=money_cfg,
+        hide_index=True,
+        num_rows="fixed",
+        key="opp_table_editor",
+    )
+
+    selected_mask = edited_opp["_select"] == True
+    n_sel = int(selected_mask.sum())
+
+    # Split selected into new vs already-existing
+    sel_rows_all = edited_opp[selected_mask].copy()
+    already_exist_mask = sel_rows_all["Initiative"].str.len() > 0
+    n_existing = int(already_exist_mask.sum())
+    n_new = n_sel - n_existing
+
+    btn_col, info_col = st.columns([2, 5])
+    with btn_col:
+        create_clicked = st.button(
+            f"Create Initiative ({n_sel} rows)" if n_sel > 0 else "Create Initiative",
+            type="primary",
+            disabled=(n_sel == 0),
+            key="opp_btn_create_initiative",
+            use_container_width=True,
+        )
+    with info_col:
+        if n_sel > 0:
+            if n_existing > 0 and n_new > 0:
+                st.warning(
+                    f"{n_existing} row(s) already have an initiative and will be **skipped**. "
+                    f"{n_new} new row(s) will be created.",
+                    icon="⚠️",
+                )
+            elif n_existing > 0 and n_new == 0:
+                st.error(
+                    f"All {n_existing} selected row(s) already have an initiative. Nothing will be created.",
+                    icon="🚫",
+                )
+            else:
+                st.caption(f"{n_new} new row(s) selected — click to promote to Initiatives tab.")
+
+    if create_clicked and n_new > 0:
+        from src.db import save_initiatives as _save_init
+        new_rows = sel_rows_all[~already_exist_mask].drop(columns=["_select", "Initiative"])
+        records = []
+        for _, r in new_rows.iterrows():
+            ps = float(r.get("Overpaid Duties", 0) or 0)
+            records.append({
+                "coo":                 str(r.get("coo", "") or ""),
+                "coi":                 str(r.get("coi", "") or ""),
+                "hs_code":             str(r.get("hs code", "") or ""),
+                "customs_value":       float(r.get("Customs Value", 0) or 0),
+                "duty_paid":           float(r.get("Duty Paid", 0) or 0),
+                "default_duties":      float(r.get("Default Duties", 0) or 0),
+                "min_duties":          float(r.get("Duty To-Be Paid", 0) or 0),
+                "potential_savings":   ps,
+                "annual_savings_est":  ps,
+                "savings_realized":    0.0,
+                "reimbursements":      0.0,
+                "status":              "Identified",
+                "product":             str(r.get(prod_col, "") or "") if prod_col else "",
+                "program_description": str(r.get(prog_col, "") or "") if prog_col else "",
+            })
+        saved = _save_init(records)
+        st.success(f"{saved} initiative(s) created successfully. Check the Initiatives tab.")
+        st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# Initiatives tab
+# -----------------------------------------------------------------------------
+_INITIATIVE_STATUS_OPTIONS = ["Identified", "Validated", "Discarded", "Completed"]
+_STATUS_COLOR = {
+    "Identified": ACCENTURE_PURPLE_LIGHT,
+    "Validated":  ACCENTURE_PURPLE_CORE,
+    "Discarded":  "rgba(255,120,120,0.85)",
+    "Completed":  "rgba(120,255,200,0.85)",
+}
+
+
+def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
+    st.subheader("Initiatives dashboard")
+
+    from src.db import update_initiatives as _upd_init, delete_initiatives as _del_init
+
+    if df_initiatives is None or df_initiatives.empty:
+        st.info("No initiatives yet. Select rows in the Opportunities tab and click **Create Initiative**.")
+        return
+
+    df = df_initiatives.copy()
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    st.markdown("### Filters")
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    coi_opts  = sorted(df["coi"].dropna().unique().tolist())  if "coi"    in df.columns else []
+    coo_opts  = sorted(df["coo"].dropna().unique().tolist())  if "coo"    in df.columns else []
+    stat_opts = sorted(df["status"].dropna().unique().tolist()) if "status" in df.columns else _INITIATIVE_STATUS_OPTIONS
+    prod_opts = sorted(df["product"].dropna().replace("", pd.NA).dropna().unique().tolist()) if "product" in df.columns else []
+
+    with fc1:
+        coi_sel  = st.multiselect("COI",     options=coi_opts,  default=[], key="ini_coi")
+    with fc2:
+        coo_sel  = st.multiselect("COO",     options=coo_opts,  default=[], key="ini_coo")
+    with fc3:
+        stat_sel = st.multiselect("Status",  options=stat_opts, default=[], key="ini_status")
+    with fc4:
+        prod_sel = st.multiselect("Product", options=prod_opts, default=[], key="ini_prod")
+
+    if coi_sel  and "coi"     in df.columns: df = df[df["coi"].isin(coi_sel)]
+    if coo_sel  and "coo"     in df.columns: df = df[df["coo"].isin(coo_sel)]
+    if stat_sel and "status"  in df.columns: df = df[df["status"].isin(stat_sel)]
+    if prod_sel and "product" in df.columns: df = df[df["product"].isin(prod_sel)]
+
+    st.caption(f"Initiatives after filters: {len(df):,} / {len(df_initiatives):,}")
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    def _f(col): return pd.to_numeric(df[col], errors="coerce").fillna(0.0) if col in df.columns else pd.Series([0.0]*len(df))
+
+    ann_savings   = float(_f("annual_savings_est").sum())
+    pot_savings   = float(_f("potential_savings").sum())
+    fta_realized  = float(_f("savings_realized").sum())
+    reimbursed    = float(_f("reimbursements").sum())
+    total_realized = fta_realized + reimbursed
+
+    st.markdown("### KPIs")
+    _render_kpi_cards([
+        {"label": "Estimated Annual Savings",  "value": _fmt_num(ann_savings)    + " €", "icon": "📅", "sub": "Sum of annual savings estimates"},
+        {"label": "Potential Reimbursements",  "value": _fmt_num(reimbursed)     + " €", "icon": "🔄", "sub": "Sum of reimbursements"},
+        {"label": "Total Potential Savings",   "value": _fmt_num(pot_savings)    + " €", "icon": "💡", "sub": "Sum of potential savings"},
+        {"label": "FTA Savings Realized",      "value": _fmt_num(fta_realized)   + " €", "icon": "✅", "sub": "Sum of savings realized"},
+        {"label": "Reimbursements Realized",   "value": _fmt_num(reimbursed)     + " €", "icon": "💰", "sub": "Sum of reimbursements"},
+        {"label": "Total Savings Realized",    "value": _fmt_num(total_realized) + " €", "icon": "🏆", "sub": "FTA Realized + Reimbursements"},
+    ], compact=True)
+
+    st.markdown("")
+
+    # ── Charts ────────────────────────────────────────────────────────────────
+    _CL = dict(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=8, t=30, b=0), showlegend=False,
+        font=dict(color="rgba(255,255,255,0.80)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.07)", tickfont=dict(size=10)),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.07)", tickfont=dict(size=10)),
+    )
+
+    cch1, cch2 = st.columns(2)
+
+    # 1 — #Initiatives by Status (horizontal stacked by COI)
+    with cch1:
+        st.markdown("**#Initiatives by Status**")
+        if "status" in df.columns:
+            if "coi" in df.columns:
+                grp = df.groupby(["status", "coi"]).size().reset_index(name="count")
+            else:
+                grp = df.groupby("status").size().reset_index(name="count")
+                grp["coi"] = "All"
+
+            status_order = [s for s in _INITIATIVE_STATUS_OPTIONS if s in grp["status"].unique()]
+            fig = px.bar(
+                grp, x="count", y="status", color="coi", orientation="h",
+                template="plotly_dark",
+                color_discrete_sequence=[
+                    ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT,
+                    ACCENTURE_PURPLE_DARK, ACCENTURE_PURPLE_LIGHTEST,
+                    ACCENTURE_PURPLE_DARKEST,
+                ],
+                category_orders={"status": status_order},
+            )
+            fig.update_layout(height=280, **_CL)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # 2 — Total Potential Savings by COI (vertical bar)
+    with cch2:
+        st.markdown("**Total Potential Savings by COI**")
+        if "coi" in df.columns:
+            grp = (
+                df.groupby("coi")["potential_savings"].sum()
+                .reset_index()
+                .sort_values("potential_savings", ascending=False)
+            )
+            fig = px.bar(
+                grp, x="coi", y="potential_savings",
+                template="plotly_dark",
+                color_discrete_sequence=[ACCENTURE_PURPLE_CORE],
+            )
+            fig.update_layout(
+                height=280, yaxis_ticksuffix=" €", **_CL
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    cch3, cch4 = st.columns(2)
+
+    # 3 — Total Savings Realized by Product (vertical bar)
+    with cch3:
+        st.markdown("**Total Savings Realized by Product**")
+        if "product" in df.columns:
+            grp = (
+                df[df["product"].notna() & (df["product"] != "")]
+                .groupby("product")["savings_realized"].sum()
+                .reset_index()
+                .sort_values("savings_realized", ascending=False)
+                .head(15)
+            )
+            if not grp.empty:
+                fig = px.bar(
+                    grp, x="product", y="savings_realized",
+                    template="plotly_dark",
+                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE],
+                )
+                fig.update_layout(
+                    height=280, yaxis_ticksuffix=" €",
+                    xaxis_tickangle=-45, **_CL
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No savings realized data yet.")
+        else:
+            st.info("No product column in data.")
+
+    # 4 — Total Savings Realized by COI (stacked: FTA + Reimbursements)
+    with cch4:
+        st.markdown("**Total Savings Realized by COI**")
+        if "coi" in df.columns:
+            fta = df.groupby("coi")["savings_realized"].sum().reset_index().rename(columns={"savings_realized": "value"})
+            fta["type"] = "FTA Savings"
+            rei = df.groupby("coi")["reimbursements"].sum().reset_index().rename(columns={"reimbursements": "value"})
+            rei["type"] = "Reimbursements"
+            stacked = pd.concat([fta, rei], ignore_index=True)
+            stacked = stacked[stacked["value"] > 0]
+            if not stacked.empty:
+                coi_order = (
+                    stacked.groupby("coi")["value"].sum()
+                    .sort_values(ascending=False).index.tolist()
+                )
+                fig = px.bar(
+                    stacked, x="coi", y="value", color="type",
+                    template="plotly_dark",
+                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT],
+                    category_orders={"coi": coi_order},
+                )
+                fig.update_layout(
+                    height=280, yaxis_ticksuffix=" €",
+                    showlegend=True,
+                    legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+                    **{k: v for k, v in _CL.items() if k != "showlegend"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No savings realized data yet.")
+
+    # ── Initiatives editor ────────────────────────────────────────────────────
+    st.markdown("### Initiatives table")
+    st.caption(
+        "Editable fields: **Status**, **Annual Savings Est.**, **Savings Realized**, **Reimbursements**. "
+        "Check **Delete** to remove rows, then click **Delete selected**."
+    )
+
+    _NUMERIC_EDITABLE = {"annual_savings_est", "savings_realized", "reimbursements"}
+    _FRIENDLY = {
+        "id":                   "ID",
+        "coo":                  "COO",
+        "coi":                  "COI",
+        "hs_code":              "HS Code",
+        "product":              "Product",
+        "program_description":  "Program",
+        "customs_value":        "Customs Value",
+        "duty_paid":            "Duty Paid",
+        "default_duties":       "Default Duties",
+        "min_duties":           "Duty To-Be Paid",
+        "potential_savings":    "Potential Savings",
+        "annual_savings_est":   "Annual Savings Est.",
+        "savings_realized":     "Savings Realized",
+        "reimbursements":       "Reimbursements",
+        "status":               "Status",
+        "created_at":           "Created At",
+    }
+
+    display_cols = [
+        "id", "status", "coo", "coi", "hs_code", "product", "program_description",
+        "customs_value", "duty_paid", "default_duties", "min_duties",
+        "potential_savings", "annual_savings_est", "savings_realized", "reimbursements",
+        "created_at",
+    ]
+    disp = df[[c for c in display_cols if c in df.columns]].copy()
+    disp.insert(0, "_delete", False)
+
+    col_cfg: dict = {
+        "_delete":   st.column_config.CheckboxColumn("Delete", default=False, width="small"),
+        "id":        st.column_config.NumberColumn("ID", disabled=True, width="small"),
+        "status":    st.column_config.SelectboxColumn(
+                         "Status", options=_INITIATIVE_STATUS_OPTIONS, width="medium"
+                     ),
+        "created_at": st.column_config.TextColumn("Created At", disabled=True, width="medium"),
+    }
+    for ro in ["coo", "coi", "hs_code", "product", "program_description"]:
+        if ro in disp.columns:
+            col_cfg[ro] = st.column_config.TextColumn(_FRIENDLY.get(ro, ro), disabled=True)
+    for mc in ["customs_value", "duty_paid", "default_duties", "min_duties", "potential_savings"]:
+        if mc in disp.columns:
+            col_cfg[mc] = st.column_config.NumberColumn(_FRIENDLY.get(mc, mc), format="%.2f €", disabled=True)
+    for mc in _NUMERIC_EDITABLE:
+        if mc in disp.columns:
+            col_cfg[mc] = st.column_config.NumberColumn(_FRIENDLY.get(mc, mc), format="%.2f €")
+
+    edited_ini = st.data_editor(
+        _make_arrow_safe(disp),
+        use_container_width=True,
+        column_config=col_cfg,
+        hide_index=True,
+        num_rows="fixed",
+        key="ini_table_editor",
+    )
+
+    btn_a, btn_b, _ = st.columns([2, 2, 4])
+    with btn_a:
+        save_ini = st.button("Save changes", type="primary", key="ini_btn_save", use_container_width=True)
+    with btn_b:
+        del_ini = st.button("Delete selected", key="ini_btn_del", use_container_width=True)
+
+    def _vals_differ(old_val, new_val, col: str) -> bool:
+        if col in _NUMERIC_EDITABLE:
+            try:
+                return abs(float(old_val or 0) - float(new_val or 0)) > 1e-6
+            except (TypeError, ValueError):
+                pass
+        return str(old_val) != str(new_val)
+
+    if save_ini:
+        base = disp.reset_index(drop=True)
+        edit = edited_ini.reset_index(drop=True)
+        changes = []
+        editable_cols = _NUMERIC_EDITABLE | {"status"}
+        for i in range(min(len(base), len(edit))):
+            b, e = base.iloc[i], edit.iloc[i]
+            diff: dict = {"id": int(b["id"])}
+            for col in editable_cols:
+                if col in b.index and col in e.index and _vals_differ(b[col], e[col], col):
+                    diff[col] = e[col]
+            if len(diff) > 1:
+                changes.append(diff)
+        if changes:
+            n = _upd_init(changes)
+            st.success(f"{n} initiative(s) updated.")
+            st.rerun()
+        else:
+            st.info("No changes detected.")
+
+    if del_ini:
+        to_del = [
+            int(edited_ini.iloc[i]["id"])
+            for i in range(len(edited_ini))
+            if edited_ini.iloc[i].get("_delete") is True or edited_ini.iloc[i].get("_delete") == 1
+        ]
+        if to_del:
+            n = _del_init(to_del)
+            st.success(f"{n} initiative(s) deleted.")
+            st.rerun()
+        else:
+            st.warning("No rows marked for deletion.")
 
 
 # -----------------------------------------------------------------------------

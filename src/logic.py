@@ -1200,3 +1200,229 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 </html>"""
 
     return html_doc.encode("utf-8")
+
+
+# -----------------------------
+# DB corrections: export / parse / diff
+# -----------------------------
+
+# Columns included in the export (display names, in order)
+_EXPORT_EDITABLE_COLS = [
+    "invoice number", "material number", "date",
+    "coo", "coi", "hs code",
+    "customs value", "cv currency", "weight",
+    "duty paid", "dp currency",
+    "hs alternative", "comment",
+]
+_EXPORT_INFO_COLS = [
+    "ref_date", "status",
+    "Min Duty Program", "Min Duty Rate", "Minimum Duties",
+    "Default Duty Program", "Default Duty Rate", "Default Duties",
+    "Input Date",
+]
+
+
+def export_merged_to_excel(df: pd.DataFrame) -> bytes:
+    """
+    Export a merged_results DataFrame to Excel bytes for the corrections workflow.
+
+    Prepends two control columns:
+      _db_id  — DB primary key (do NOT modify or delete this column)
+      _delete — set to TRUE to delete this row on reimport
+
+    Returns bytes ready for st.download_button.
+    """
+    import io
+
+    out = df.copy()
+
+    if "id" in out.columns:
+        out.insert(0, "_db_id", out["id"])
+    else:
+        out.insert(0, "_db_id", None)
+    out.insert(1, "_delete", False)
+
+    # Drop columns that are internal and shouldn't clutter the sheet
+    for col in ["id", "run_id", "saved_at"]:
+        if col in out.columns:
+            out = out.drop(columns=[col])
+
+    # Reorder: control → editable → info → rest
+    ordered = ["_db_id", "_delete"]
+    for col in _EXPORT_EDITABLE_COLS:
+        if col in out.columns:
+            ordered.append(col)
+    for col in _EXPORT_INFO_COLS:
+        if col in out.columns:
+            ordered.append(col)
+    for col in out.columns:
+        if col not in ordered:
+            ordered.append(col)
+
+    out = out[[c for c in ordered if c in out.columns]]
+
+    buf = io.BytesIO()
+    out.to_excel(buf, index=False, sheet_name="Corrections")
+    return buf.getvalue()
+
+
+def _corr_vals_equal(a, b) -> bool:
+    """Return True if two values are considered equal (NaN-safe, float-rounded)."""
+    import math
+    # Both None / NaN
+    try:
+        a_nan = a is None or (isinstance(a, float) and math.isnan(a)) or pd.isna(a)
+        b_nan = b is None or (isinstance(b, float) and math.isnan(b)) or pd.isna(b)
+    except (TypeError, ValueError):
+        a_nan = b_nan = False
+    if a_nan and b_nan:
+        return True
+    if a_nan or b_nan:
+        return False
+    # Numeric: round to 2dp
+    try:
+        return round(float(a), 2) == round(float(b), 2)
+    except (TypeError, ValueError):
+        pass
+    return str(a).strip() == str(b).strip()
+
+
+def _coerce_correction(val, db_col: str):
+    """Coerce an imported Excel value to the right Python type for the DB column."""
+    _numeric = {"customs_value", "weight", "duty_paid",
+                "min_duty_rate", "default_duty_rate", "minimum_duties", "default_duties"}
+    if db_col in _numeric:
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return s if s else None
+
+
+def parse_corrections_excel(
+    uploaded_file,
+    df_current: pd.DataFrame,
+) -> tuple:
+    """
+    Parse a corrections Excel file (produced by export_merged_to_excel) and
+    compute the diff against the current DB state.
+
+    Parameters
+    ----------
+    uploaded_file : file-like object from st.file_uploader
+    df_current    : current merged_results DataFrame (must contain 'id' column)
+
+    Returns
+    -------
+    (diff, errors)
+      diff   : dict with keys "updates", "deletes", "update_preview", "delete_preview"
+               or None if parsing failed.
+      errors : list[str] — non-fatal warnings if non-empty; may coexist with a valid diff.
+    """
+    from src.db import EDITABLE_COL_DF_TO_DB
+
+    errors: list = []
+
+    try:
+        df_corr = pd.read_excel(uploaded_file, sheet_name="Corrections")
+    except Exception as exc:
+        return None, [f"No se pudo leer el archivo Excel: {exc}"]
+
+    if "_db_id" not in df_corr.columns:
+        return None, [
+            "El archivo no contiene la columna '_db_id'. "
+            "Usa únicamente archivos exportados desde Duty Cockpit."
+        ]
+
+    # Normalise _db_id to int
+    df_corr["_db_id"] = pd.to_numeric(df_corr["_db_id"], errors="coerce")
+    n_bad = int(df_corr["_db_id"].isna().sum())
+    if n_bad:
+        errors.append(f"{n_bad} fila(s) con _db_id inválido ignoradas.")
+    df_corr = df_corr[df_corr["_db_id"].notna()].copy()
+    df_corr["_db_id"] = df_corr["_db_id"].astype(int)
+
+    # Validate ids exist in the current dataset
+    if "id" in df_current.columns:
+        valid_ids = set(df_current["id"].dropna().astype(int).tolist())
+        unknown = set(df_corr["_db_id"].tolist()) - valid_ids
+        if unknown:
+            sample = sorted(unknown)[:5]
+            suffix = "..." if len(unknown) > 5 else ""
+            errors.append(
+                f"{len(unknown)} _db_id(s) no existen en la DB: "
+                f"{sample}{suffix}. Serán ignoradas."
+            )
+            df_corr = df_corr[df_corr["_db_id"].isin(valid_ids)]
+
+    if df_corr.empty:
+        return None, errors + ["No quedan filas válidas para procesar."]
+
+    # Split deletes from updates
+    if "_delete" in df_corr.columns:
+        del_mask = (
+            df_corr["_delete"]
+            .astype(str).str.strip().str.upper()
+            .isin(["TRUE", "1", "YES", "SI", "SÍ", "VERDADERO"])
+        )
+        delete_ids = df_corr.loc[del_mask, "_db_id"].astype(int).tolist()
+        df_updates = df_corr[~del_mask].copy()
+    else:
+        delete_ids = []
+        df_updates = df_corr.copy()
+
+    # Index current df by id for fast lookup
+    current_by_id = (
+        df_current.set_index("id") if "id" in df_current.columns else pd.DataFrame()
+    )
+
+    updates: list = []
+    preview_rows: list = []
+
+    for _, row in df_updates.iterrows():
+        rid = int(row["_db_id"])
+        if rid not in current_by_id.index:
+            continue
+
+        current = current_by_id.loc[rid]
+        row_changes: dict = {"id": rid}
+        preview: dict = {"id": rid}
+
+        for df_col, db_col in EDITABLE_COL_DF_TO_DB.items():
+            if df_col not in row.index:
+                continue
+            new_val = row[df_col]
+            old_val = current.get(df_col) if df_col in current.index else None
+
+            if not _corr_vals_equal(old_val, new_val):
+                row_changes[db_col] = _coerce_correction(new_val, db_col)
+                preview[df_col] = f"{old_val}  →  {new_val}"
+
+        if len(row_changes) > 1:  # has actual changes beyond just "id"
+            updates.append(row_changes)
+            preview_rows.append(preview)
+
+    update_preview = pd.DataFrame(preview_rows) if preview_rows else pd.DataFrame()
+
+    if delete_ids and "id" in df_current.columns:
+        id_cols = [c for c in ["id", "invoice number", "material number", "coo", "coi", "hs code"]
+                   if c in df_current.columns]
+        delete_preview = df_current[df_current["id"].isin(delete_ids)][id_cols].copy()
+    else:
+        delete_preview = pd.DataFrame()
+
+    diff = {
+        "updates": updates,
+        "deletes": delete_ids,
+        "update_preview": update_preview,
+        "delete_preview": delete_preview,
+    }
+    return diff, errors

@@ -28,6 +28,27 @@ def _connect() -> sqlite3.Connection:
 # Schema
 # ---------------------------------------------------------------------------
 
+_INITIATIVES_DDL = """
+CREATE TABLE IF NOT EXISTS initiatives (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    coo                 TEXT,
+    coi                 TEXT,
+    hs_code             TEXT,
+    customs_value       REAL,
+    duty_paid           REAL,
+    default_duties      REAL,
+    min_duties          REAL,
+    potential_savings   REAL,
+    annual_savings_est  REAL,
+    savings_realized    REAL DEFAULT 0,
+    reimbursements      REAL DEFAULT 0,
+    status              TEXT DEFAULT 'Identified',
+    product             TEXT,
+    program_description TEXT,
+    created_at          TEXT NOT NULL
+);
+"""
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS account_labels (
     account_key     TEXT PRIMARY KEY,
@@ -120,19 +141,35 @@ _RUNS_NEW_COLS = [
     "environment TEXT",
 ]
 
+# Safe migration: columns added to `merged_results` in newer deployments
+_MERGED_NEW_COLS = [
+    "customs_value_original REAL",
+    "cv_currency_original TEXT",
+]
+
 
 def _migrate_runs(conn: sqlite3.Connection) -> None:
     for col_def in _RUNS_NEW_COLS:
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col_def}")
         except sqlite3.OperationalError:
-            pass  # column already exists
+            pass
+
+
+def _migrate_merged(conn: sqlite3.Connection) -> None:
+    for col_def in _MERGED_NEW_COLS:
+        try:
+            conn.execute(f"ALTER TABLE merged_results ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_DDL)
+        conn.executescript(_INITIATIVES_DDL)
         _migrate_runs(conn)
+        _migrate_merged(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +220,189 @@ def get_query_counter(account_key: Optional[str] = None) -> int:
                    FROM runs WHERE cancelled = 0"""
             ).fetchone()
     return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Editable column registry
+# ---------------------------------------------------------------------------
+
+# DB column names the user is allowed to update
+_EDITABLE_MERGED_DB_COLS: frozenset = frozenset({
+    "coo", "coi", "hs_code", "customs_value", "cv_currency",
+    "weight", "duty_paid", "dp_currency", "hs_alternative", "comment",
+})
+
+# Mapping: DataFrame display column name → DB column name (editable columns only)
+EDITABLE_COL_DF_TO_DB: dict = {
+    "coo":            "coo",
+    "coi":            "coi",
+    "hs code":        "hs_code",
+    "customs value":  "customs_value",
+    "cv currency":    "cv_currency",
+    "weight":         "weight",
+    "duty paid":      "duty_paid",
+    "dp currency":    "dp_currency",
+    "hs alternative": "hs_alternative",
+    "comment":        "comment",
+}
+
+
+# ---------------------------------------------------------------------------
+# Update / Delete
+# ---------------------------------------------------------------------------
+
+def update_merged_rows(changes: list) -> int:
+    """
+    Bulk-update rows in merged_results.
+
+    Each entry in `changes` must be a dict with:
+      - "id": int  — the row's primary key
+      - one or more keys from _EDITABLE_MERGED_DB_COLS with their new values
+
+    Returns the number of rows updated.
+    """
+    if not changes:
+        return 0
+    init_db()
+    count = 0
+    with _connect() as conn:
+        for entry in changes:
+            row_id = entry.get("id")
+            if row_id is None:
+                continue
+            safe = {k: v for k, v in entry.items()
+                    if k != "id" and k in _EDITABLE_MERGED_DB_COLS}
+            if not safe:
+                continue
+            set_clause = ", ".join(f"{col} = ?" for col in safe)
+            conn.execute(
+                f"UPDATE merged_results SET {set_clause} WHERE id = ?",
+                list(safe.values()) + [int(row_id)],
+            )
+            count += 1
+    return count
+
+
+def delete_merged_rows(ids: list) -> int:
+    """
+    Delete rows from merged_results by primary key.
+    Returns the number of rows deleted.
+    """
+    if not ids:
+        return 0
+    init_db()
+    placeholders = ", ".join("?" * len(ids))
+    with _connect() as conn:
+        cur = conn.execute(
+            f"DELETE FROM merged_results WHERE id IN ({placeholders})",
+            [int(i) for i in ids],
+        )
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection
+# ---------------------------------------------------------------------------
+
+def find_duplicate_transactions(df: pd.DataFrame, ref_date: str) -> pd.DataFrame:  # noqa: ARG001
+    """
+    Return the subset of rows in `df` that already exist in merged_results.
+
+    No ref_date filter — the same transaction should not be re-sent regardless of
+    which accounting period it was originally processed under.
+
+    Match strategy (in order of reliability):
+    1. invoice_number + material_number + customs_value_original + cv_currency_original
+       (when both business IDs and original currency values are present in df and DB)
+    2. invoice_number + material_number only
+       (when DB has old rows without customs_value_original stored)
+    3. coo + coi + hs_code + customs_value_original + cv_currency_original + weight
+       (fallback when no invoice/material in df)
+
+    customs_value_original is used instead of the EUR-converted customs_value to
+    avoid false negatives caused by FX rate changes between runs.
+    """
+    init_db()
+
+    has_invoice = "invoice number" in df.columns and df["invoice number"].notna().any()
+    has_material = "material number" in df.columns and df["material number"].notna().any()
+    has_cv_orig_df = "customs value original" in df.columns and df["customs value original"].notna().any()
+    use_business_key = has_invoice and has_material
+
+    with _connect() as conn:
+        if use_business_key:
+            db_keys = pd.read_sql_query(
+                """
+                SELECT DISTINCT invoice_number, material_number,
+                                customs_value_original, cv_currency_original
+                FROM merged_results
+                WHERE invoice_number IS NOT NULL AND material_number IS NOT NULL
+                """,
+                conn,
+            )
+        else:
+            db_keys = pd.read_sql_query(
+                """
+                SELECT DISTINCT coo, coi, hs_code,
+                                customs_value_original, cv_currency_original, weight
+                FROM merged_results
+                """,
+                conn,
+            )
+
+    if db_keys.empty:
+        return pd.DataFrame(columns=df.columns)
+
+    rename_map = {
+        "invoice_number": "invoice number",
+        "material_number": "material number",
+        "hs_code": "hs code",
+        "customs_value_original": "customs value original",
+        "cv_currency_original": "cv currency original",
+    }
+    db_keys = db_keys.rename(columns=rename_map)
+
+    db_has_cv_orig = (
+        "customs value original" in db_keys.columns
+        and db_keys["customs value original"].notna().any()
+    )
+
+    if use_business_key:
+        if has_cv_orig_df and db_has_cv_orig:
+            merge_on = ["invoice number", "material number",
+                        "customs value original", "cv currency original"]
+        else:
+            merge_on = ["invoice number", "material number"]
+    else:
+        if has_cv_orig_df and db_has_cv_orig:
+            merge_on = ["coo", "coi", "hs code",
+                        "customs value original", "cv currency original", "weight"]
+        else:
+            merge_on = ["coo", "coi", "hs code", "weight"]
+
+    merge_on = [c for c in merge_on if c in df.columns and c in db_keys.columns]
+
+    if not merge_on:
+        return pd.DataFrame(columns=df.columns)
+
+    _NUM_SENTINEL = -1.0
+    _STR_SENTINEL = "__null__"
+    _NUMERIC_COLS = {"customs value original", "weight"}
+
+    df_norm = df[merge_on].copy()
+    db_norm = db_keys[merge_on].drop_duplicates().copy()
+
+    for col in merge_on:
+        if col in _NUMERIC_COLS:
+            df_norm[col] = pd.to_numeric(df_norm[col], errors="coerce").round(2).fillna(_NUM_SENTINEL)
+            db_norm[col] = pd.to_numeric(db_norm[col], errors="coerce").round(2).fillna(_NUM_SENTINEL)
+        else:
+            df_norm[col] = df_norm[col].fillna(_STR_SENTINEL).astype(str).str.strip().str.upper()
+            db_norm[col] = db_norm[col].fillna(_STR_SENTINEL).astype(str).str.strip().str.upper()
+
+    tagged = df_norm.merge(db_norm, on=merge_on, how="left", indicator=True)
+    is_dup = (tagged["_merge"] == "both").values
+    return df[is_dup].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +470,7 @@ def save_run_results(
                     minimum_duties, currency_min_duties,
                     default_duty_program, default_duty_rate, default_duty_program_description,
                     default_duties, currency_default_duties,
+                    customs_value_original, cv_currency_original,
                     input_date, saved_at
                 ) VALUES (
                     :run_id, :ref_date, :date, :invoice_number, :material_number,
@@ -260,6 +481,7 @@ def save_run_results(
                     :minimum_duties, :currency_min_duties,
                     :default_duty_program, :default_duty_rate, :default_duty_program_description,
                     :default_duties, :currency_default_duties,
+                    :customs_value_original, :cv_currency_original,
                     :input_date, :saved_at
                 )""",
                 _normalise_merged(df_merged, run_id, ref_date, now),
@@ -324,6 +546,8 @@ def _normalise_merged(df, run_id, ref_date, saved_at):
         "default_duty_program_description": _str(r.get("Default Duty Program Description")),
         "default_duties": _float(r.get("Default Duties")),
         "currency_default_duties": _str(r.get("Currency Default Duties")),
+        "customs_value_original": _float(r.get("customs value original")),
+        "cv_currency_original": _str(r.get("cv currency original")),
         "input_date": _str(r.get("Input Date")),
         "saved_at": saved_at,
     } for _, r in df.iterrows()]
@@ -449,3 +673,82 @@ def _float(v) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Initiatives
+# ---------------------------------------------------------------------------
+
+_INITIATIVES_EDITABLE = frozenset({
+    "status", "annual_savings_est", "savings_realized", "reimbursements",
+})
+
+_INITIATIVES_STATUS_OPTIONS = ["Identified", "Validated", "Discarded", "Completed"]
+
+
+def save_initiatives(rows: list) -> int:
+    """Insert new initiative rows. Returns number inserted."""
+    if not rows:
+        return 0
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.executemany(
+            """INSERT INTO initiatives
+               (coo, coi, hs_code, customs_value, duty_paid, default_duties,
+                min_duties, potential_savings, annual_savings_est,
+                savings_realized, reimbursements, status,
+                product, program_description, created_at)
+               VALUES
+               (:coo, :coi, :hs_code, :customs_value, :duty_paid, :default_duties,
+                :min_duties, :potential_savings, :annual_savings_est,
+                :savings_realized, :reimbursements, :status,
+                :product, :program_description, :created_at)""",
+            [{**r, "created_at": now} for r in rows],
+        )
+    return len(rows)
+
+
+def load_initiatives() -> pd.DataFrame:
+    init_db()
+    with _connect() as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM initiatives ORDER BY id DESC", conn
+        )
+
+
+def update_initiatives(changes: list) -> int:
+    """Update editable fields on existing initiatives by id."""
+    if not changes:
+        return 0
+    init_db()
+    count = 0
+    with _connect() as conn:
+        for entry in changes:
+            row_id = entry.get("id")
+            if row_id is None:
+                continue
+            safe = {k: v for k, v in entry.items()
+                    if k != "id" and k in _INITIATIVES_EDITABLE}
+            if not safe:
+                continue
+            set_clause = ", ".join(f"{col} = ?" for col in safe)
+            conn.execute(
+                f"UPDATE initiatives SET {set_clause} WHERE id = ?",
+                list(safe.values()) + [int(row_id)],
+            )
+            count += 1
+    return count
+
+
+def delete_initiatives(ids: list) -> int:
+    if not ids:
+        return 0
+    init_db()
+    placeholders = ", ".join("?" * len(ids))
+    with _connect() as conn:
+        cur = conn.execute(
+            f"DELETE FROM initiatives WHERE id IN ({placeholders})",
+            [int(i) for i in ids],
+        )
+    return cur.rowcount

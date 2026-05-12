@@ -12,6 +12,7 @@ from src.db import (
     get_run_history,
     get_account_label,
     get_query_counter,
+    find_duplicate_transactions,
 )
 from src.ui import (
     render_sidebar_controls,
@@ -19,10 +20,13 @@ from src.ui import (
     render_process_pre,
     render_process_post,
     render_tab_resultados,
+    render_tab_opportunities,
+    render_tab_initiatives,
     render_tab_logs,
     render_process_auth_gate,
     render_logout_control,
 )
+from src.db import load_initiatives
 
 
 def _init_state():
@@ -48,6 +52,16 @@ def _init_state():
         "df_ok": None,
         "df_merged": None,
         "run_summary": None,
+        # Duplicate-check flow
+        "dup_rows": None,      # DataFrame of rows already in DB
+        "dup_decision": None,  # "skip" | "all"
+        # DB editor flow
+        "db_edit_mode": "view",          # "view"|"inline"|"inline_review"|"corrections_review"
+        "db_editor_base_df": None,       # df used as starting point for inline editor
+        "db_inline_changes": None,       # list[dict] — inline edit diff
+        "db_inline_deletes": None,       # list[int]  — ids to delete from inline editor
+        "db_corrections_diff": None,     # dict — diff from Excel corrections
+        "db_corrections_errors": None,   # list[str]
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -138,7 +152,7 @@ if cancel_clicked:
     st.session_state.cancel_requested = True
     st.sidebar.info("Cancel requested. The run will stop after the current row finishes.")
 
-tabs = st.tabs(["Process", "Results", "Logs"])
+tabs = st.tabs(["Process", "Results", "Opportunities", "Initiatives", "Logs"])
 
 # -------------------------
 # 1) Load + validate
@@ -167,7 +181,7 @@ if uploaded_file is None:
 elif load_error:
     st.session_state.run_state = "failed"
 else:
-    if st.session_state.run_state not in ("completed", "cancelled", "failed", "running"):
+    if st.session_state.run_state not in ("completed", "cancelled", "failed", "running", "duplicate_decision"):
         st.session_state.run_state = "ready"
 
 # -------------------------
@@ -191,7 +205,121 @@ with tabs[0]:
     post_container = st.container()
 
 # -------------------------
-# 3) Execution
+# 3) Execution helpers
+# -------------------------
+
+def _execute_api_run(df_to_run):
+    """
+    Run the E2Open API loop for df_to_run and persist results.
+    Captures ref_date, exec_container, and session state from the enclosing scope.
+    """
+    st.session_state.run_state = "running"
+
+    with exec_container:
+        st.subheader("Execution")
+        status = st.status("Starting E2Open session and processing rows...", expanded=True)
+        progress_bar = st.progress(0)
+
+        total_to_run = len(df_to_run)
+
+        def progress_cb(i: int, total_n: int, msg: str):
+            if total_n > 0:
+                progress_bar.progress(min(i / total_n, 1.0))
+            status.write(msg)
+
+        def should_cancel() -> bool:
+            return bool(st.session_state.cancel_requested)
+
+        try:
+            status.update(label="Running API calls...", state="running")
+
+            _credentials = {
+                "username": st.session_state.e2open_username,
+                "password": st.session_state.e2open_password,
+                "tenant": st.session_state.e2open_tenant,
+                "environment": st.session_state.e2open_env,
+            }
+            failed_df, ok_df, logs = run_api_loop(
+                df_in=df_to_run,
+                ref_date=ref_date,
+                credentials=_credentials,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
+
+            st.session_state.logs = logs
+            st.session_state.df_failed = failed_df
+            st.session_state.df_ok = ok_df
+
+            processed = int(ok_df.shape[0] + failed_df.shape[0])
+            missing_n = (int(st.session_state.df_missing.shape[0])
+                         if st.session_state.df_missing is not None else 0)
+
+            _account_key = st.session_state.account_key or None
+            _account_label = st.session_state.account_label or None
+            _environment = st.session_state.e2open_env or None
+
+            if should_cancel():
+                status.update(label="Cancelled by user.", state="error")
+                st.session_state.run_state = "cancelled"
+                st.session_state.run_summary = {
+                    "cancelled": True,
+                    "processed": processed,
+                    "ok": int(ok_df.shape[0]),
+                    "failed": int(failed_df.shape[0]),
+                    "missing": missing_n,
+                    "total_candidates": total_to_run,
+                }
+                try:
+                    save_run_results(
+                        ok_df, failed_df, None, ref_date,
+                        st.session_state.run_summary,
+                        account_key=_account_key,
+                        account_label=_account_label,
+                        environment=_environment,
+                    )
+                except Exception as db_err:
+                    st.warning(f"DB save failed (cancelled run): {db_err}")
+            else:
+                df_merged = postprocess_results(
+                    ok_input_df=df_to_run,
+                    ok_df=ok_df,
+                    failed_df=failed_df,
+                    df_missing=st.session_state.df_missing,
+                    ref_date=ref_date,
+                    logs=logs,
+                )
+                st.session_state.df_merged = df_merged
+
+                status.update(label="Analysis completed.", state="complete")
+                st.session_state.run_state = "completed"
+                st.session_state.run_summary = {
+                    "cancelled": False,
+                    "processed": processed,
+                    "ok": int(ok_df.shape[0]),
+                    "failed": int(failed_df.shape[0]),
+                    "missing": missing_n,
+                    "total_candidates": total_to_run,
+                }
+                try:
+                    save_run_results(
+                        ok_df, failed_df, df_merged, ref_date,
+                        st.session_state.run_summary,
+                        account_key=_account_key,
+                        account_label=_account_label,
+                        environment=_environment,
+                    )
+                except Exception as db_err:
+                    st.warning(f"DB save failed: {db_err}")
+
+        except Exception as e:
+            status.update(label="Execution failed.", state="error")
+            st.session_state.run_state = "failed"
+            st.exception(e)
+
+
+# -------------------------
+# 4) Handle analyze click
 # -------------------------
 if analyze_clicked:
     st.session_state.last_run_id += 1
@@ -201,7 +329,11 @@ if analyze_clicked:
     st.session_state.df_failed = None
     st.session_state.df_ok = None
     st.session_state.run_summary = None
-    st.session_state.run_state = "running"
+    st.session_state.dup_rows = None
+    st.session_state.dup_decision = None
+    st.session_state.run_state = "ready"
+    st.session_state.db_edit_mode = "view"
+    st.session_state.db_editor_base_df = None
 
     if not st.session_state.auth_ok:
         with tabs[0]:
@@ -217,108 +349,75 @@ if analyze_clicked:
         with tabs[0]:
             st.warning("No candidate rows to process (or all rows are already marked as analyzed).")
     else:
+        try:
+            dups = find_duplicate_transactions(st.session_state.df_clean, ref_date)
+        except Exception as _dup_err:
+            with tabs[0]:
+                st.warning(f"Duplicate check failed ({_dup_err}). Proceeding without duplicate check.")
+            dups = None
+
+        if dups is None or dups.empty:
+            _execute_api_run(st.session_state.df_clean)
+        else:
+            st.session_state.dup_rows = dups
+            st.session_state.run_state = "duplicate_decision"
+
+
+# -------------------------
+# 5) Duplicate decision UI
+# -------------------------
+if st.session_state.run_state == "duplicate_decision" and st.session_state.dup_rows is not None:
+    with tabs[0]:
         with exec_container:
-            st.subheader("Execution")
-            status = st.status("Starting E2Open session and processing rows...", expanded=True)
-            progress_bar = st.progress(0)
+            dup_n = len(st.session_state.dup_rows)
+            total_n = len(st.session_state.df_clean) if st.session_state.df_clean is not None else 0
+            new_n = total_n - dup_n
 
-            total = len(st.session_state.df_clean)
+            st.warning(
+                f"**{dup_n} of {total_n} transactions** have already been sent to E2Open "
+                f"with this reference date. **{new_n} new** transactions remain unsent."
+            )
 
-            def progress_cb(i: int, total_n: int, msg: str):
-                if total_n > 0:
-                    progress_bar.progress(min(i / total_n, 1.0))
-                status.write(msg)
+            show_cols = [c for c in ["invoice number", "material number", "coo", "coi",
+                                     "hs code", "customs value", "duty paid"]
+                         if c in st.session_state.dup_rows.columns]
+            with st.expander(f"View {dup_n} duplicate transactions", expanded=False):
+                st.dataframe(st.session_state.dup_rows[show_cols], use_container_width=True)
 
-            def should_cancel() -> bool:
-                return bool(st.session_state.cancel_requested)
-
-            try:
-                status.update(label="Running API calls...", state="running")
-
-                _credentials = {
-                    "username": st.session_state.e2open_username,
-                    "password": st.session_state.e2open_password,
-                    "tenant": st.session_state.e2open_tenant,
-                    "environment": st.session_state.e2open_env,
-                }
-                failed_df, ok_df, logs = run_api_loop(
-                    df_in=st.session_state.df_clean,
-                    ref_date=ref_date,
-                    credentials=_credentials,
-                    progress_cb=progress_cb,
-                    should_cancel=should_cancel,
+            col1, col2, col3 = st.columns([3, 3, 1])
+            with col1:
+                btn_skip = st.button(
+                    f"Skip duplicates — send {new_n} new",
+                    type="primary",
+                    key="dup_btn_skip",
+                    disabled=(new_n == 0),
                 )
+            with col2:
+                btn_all = st.button(
+                    f"Reprocess all — send {total_n}",
+                    key="dup_btn_all",
+                )
+            with col3:
+                btn_cancel = st.button("Cancel", key="dup_btn_cancel")
 
-                st.session_state.logs = logs
-                st.session_state.df_failed = failed_df
-                st.session_state.df_ok = ok_df
+            if btn_cancel:
+                st.session_state.run_state = "ready"
+                st.session_state.dup_rows = None
+                st.rerun()
+            elif btn_skip:
+                dup_idx = set(st.session_state.dup_rows.index)
+                df_new = st.session_state.df_clean[
+                    ~st.session_state.df_clean.index.isin(dup_idx)
+                ].copy()
+                st.session_state.dup_decision = "skip"
+                _execute_api_run(df_new)
+            elif btn_all:
+                st.session_state.dup_decision = "all"
+                _execute_api_run(st.session_state.df_clean)
 
-                processed = int(ok_df.shape[0] + failed_df.shape[0])
-                missing_n = int(st.session_state.df_missing.shape[0]) if st.session_state.df_missing is not None else 0
-
-                _account_key = st.session_state.account_key or None
-                _account_label = st.session_state.account_label or None
-                _environment = st.session_state.e2open_env or None
-
-                if should_cancel():
-                    status.update(label="Cancelled by user.", state="error")
-                    st.session_state.run_state = "cancelled"
-                    st.session_state.run_summary = {
-                        "cancelled": True,
-                        "processed": processed,
-                        "ok": int(ok_df.shape[0]),
-                        "failed": int(failed_df.shape[0]),
-                        "missing": missing_n,
-                        "total_candidates": int(total),
-                    }
-                    try:
-                        save_run_results(
-                            ok_df, failed_df, None, ref_date,
-                            st.session_state.run_summary,
-                            account_key=_account_key,
-                            account_label=_account_label,
-                            environment=_environment,
-                        )
-                    except Exception as db_err:
-                        st.warning(f"DB save failed (cancelled run): {db_err}")
-                else:
-                    df_merged = postprocess_results(
-                        ok_input_df=st.session_state.df_clean,
-                        ok_df=ok_df,
-                        failed_df=failed_df,
-                        df_missing=st.session_state.df_missing,
-                        ref_date=ref_date,
-                        logs=logs,
-                    )
-                    st.session_state.df_merged = df_merged
-
-                    status.update(label="Analysis completed.", state="complete")
-                    st.session_state.run_state = "completed"
-                    st.session_state.run_summary = {
-                        "cancelled": False,
-                        "processed": processed,
-                        "ok": int(ok_df.shape[0]),
-                        "failed": int(failed_df.shape[0]),
-                        "missing": missing_n,
-                        "total_candidates": int(total),
-                    }
-                    try:
-                        save_run_results(
-                            ok_df, failed_df, df_merged, ref_date,
-                            st.session_state.run_summary,
-                            account_key=_account_key,
-                            account_label=_account_label,
-                            environment=_environment,
-                        )
-                    except Exception as db_err:
-                        st.warning(f"DB save failed: {db_err}")
-
-            except Exception as e:
-                status.update(label="Execution failed.", state="error")
-                st.session_state.run_state = "failed"
-                st.exception(e)
-
-# Post-run block
+# -------------------------
+# 6) Post-run block
+# -------------------------
 with tabs[0]:
     if st.session_state.run_summary is not None:
         with post_container:
@@ -349,11 +448,26 @@ with tabs[1]:
     )
 
 # -------------------------
-# 5) Logs tab
+# 5) Opportunities tab
+# -------------------------
+df_initiatives_all = load_initiatives()
+
+with tabs[2]:
+    render_tab_opportunities(df_merged=df_merged_all, df_initiatives=df_initiatives_all)
+
+# -------------------------
+# 6) Initiatives tab
+# -------------------------
+
+with tabs[3]:
+    render_tab_initiatives(df_initiatives=df_initiatives_all)
+
+# -------------------------
+# 7) Logs tab
 # -------------------------
 _total_queries = get_query_counter(st.session_state.account_key or None)
 
-with tabs[2]:
+with tabs[4]:
     render_tab_logs(
         logs=st.session_state.logs,
         run_summary=st.session_state.run_summary,
