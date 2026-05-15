@@ -16,6 +16,7 @@ from src.db import (
 )
 from src.ui import (
     render_sidebar_controls,
+    render_sidebar_filters,
     render_hero_header,
     render_process_pre,
     render_process_post,
@@ -53,15 +54,15 @@ def _init_state():
         "df_merged": None,
         "run_summary": None,
         # Duplicate-check flow
-        "dup_rows": None,      # DataFrame of rows already in DB
-        "dup_decision": None,  # "skip" | "all"
+        "dup_rows": None,
+        "dup_decision": None,
         # DB editor flow
-        "db_edit_mode": "view",          # "view"|"inline"|"inline_review"|"corrections_review"
-        "db_editor_base_df": None,       # df used as starting point for inline editor
-        "db_inline_changes": None,       # list[dict] — inline edit diff
-        "db_inline_deletes": None,       # list[int]  — ids to delete from inline editor
-        "db_corrections_diff": None,     # dict — diff from Excel corrections
-        "db_corrections_errors": None,   # list[str]
+        "db_edit_mode": "view",
+        "db_editor_base_df": None,
+        "db_inline_changes": None,
+        "db_inline_deletes": None,
+        "db_corrections_diff": None,
+        "db_corrections_errors": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -70,7 +71,7 @@ def _init_state():
 
 _init_state()
 
-# Safety net: if auth_ok but account_key not yet set (e.g. after hot reload)
+# Safety net: if auth_ok but account_key not yet set
 if st.session_state.auth_ok and not st.session_state.account_key:
     _ak = f"{st.session_state.e2open_env}:{st.session_state.e2open_username}:{st.session_state.e2open_tenant}"
     st.session_state.account_key = _ak
@@ -119,11 +120,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -------------------------
-# Sidebar
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Load data early — needed for the sidebar filter panel
+# ─────────────────────────────────────────────────────────────────────────────
+df_merged_all    = load_merged_results()
+df_initiatives_all = load_initiatives()
+run_history_df   = get_run_history()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar — always shows the filter panel (not the process controls)
+# ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    sidebar = render_sidebar_controls()
+    render_sidebar_filters(df_merged_all)
     if st.session_state.auth_ok:
         if render_logout_control():
             st.session_state.auth_ok = False
@@ -135,12 +143,6 @@ with st.sidebar:
             st.session_state.account_label = ""
             st.rerun()
 
-uploaded_file = sidebar["uploaded_file"]
-sheet_name = sidebar["sheet_name"]
-ref_date = sidebar["ref_date"]
-analyze_clicked = sidebar["analyze_clicked"]
-cancel_clicked = sidebar["cancel_clicked"]
-
 render_hero_header(
     title="E2Open Duty Analyzer",
     subtitle="MVP • Streamlit",
@@ -148,46 +150,76 @@ render_hero_header(
     account_label=st.session_state.account_label,
 )
 
-if cancel_clicked:
-    st.session_state.cancel_requested = True
-    st.sidebar.info("Cancel requested. The run will stop after the current row finishes.")
-
 tabs = st.tabs(["Process", "Results", "Opportunities", "Initiatives", "Logs"])
 
-# -------------------------
-# 1) Load + validate
-# -------------------------
-df_loaded = None
-load_error = None
-warnings_info = None
+# Auto-navigate to a tab when a drill-down "Show Details" was clicked
+if "goto_tab" in st.session_state:
+    import streamlit.components.v1 as _stc
+    _goto_idx = st.session_state.pop("goto_tab")
+    _stc.html(
+        f"""<script>
+        setTimeout(function(){{
+            var t = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            if (t && t[{_goto_idx}]) t[{_goto_idx}].click();
+        }}, 80);
+        </script>""",
+        height=0,
+    )
 
-if uploaded_file is not None:
-    try:
-        df_loaded = load_transactions_excel(uploaded_file, sheet_name=sheet_name)
-        st.session_state.df_preview = df_loaded
-    except Exception as e:
-        load_error = str(e)
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) Process tab — controls rendered inline at top of tab
+# ─────────────────────────────────────────────────────────────────────────────
 
-if df_loaded is not None and load_error is None:
-    try:
-        df_clean, df_missing, warnings_info = validate_and_clean_transactions(df_loaded)
-        st.session_state.df_clean = df_clean
-        st.session_state.df_missing = df_missing
-    except Exception as e:
-        load_error = str(e)
+# Safe defaults
+uploaded_file   = None
+sheet_name      = "Transactions"
+ref_date        = ""
+analyze_clicked = False
+cancel_clicked  = False
+df_loaded       = None
+load_error      = None
+warnings_info   = None
+exec_container  = None
+post_container  = None
 
-if uploaded_file is None:
-    st.session_state.run_state = "ready"
-elif load_error:
-    st.session_state.run_state = "failed"
-else:
-    if st.session_state.run_state not in ("completed", "cancelled", "failed", "running", "duplicate_decision"):
-        st.session_state.run_state = "ready"
-
-# -------------------------
-# 2) Process tab
-# -------------------------
 with tabs[0]:
+    _ctrl         = render_sidebar_controls()
+    uploaded_file   = _ctrl["uploaded_file"]
+    sheet_name      = _ctrl["sheet_name"]
+    ref_date        = _ctrl["ref_date"]
+    analyze_clicked = _ctrl["analyze_clicked"]
+    cancel_clicked  = _ctrl["cancel_clicked"]
+
+    if cancel_clicked:
+        st.session_state.cancel_requested = True
+        st.info("Cancel requested. The run will stop after the current row finishes.")
+
+    # ── Load + validate ───────────────────────────────────────────────────
+    if uploaded_file is not None:
+        try:
+            df_loaded = load_transactions_excel(uploaded_file, sheet_name=sheet_name)
+            st.session_state.df_preview = df_loaded
+        except Exception as e:
+            load_error = str(e)
+
+    if df_loaded is not None and load_error is None:
+        try:
+            df_clean, df_missing, warnings_info = validate_and_clean_transactions(df_loaded)
+            st.session_state.df_clean   = df_clean
+            st.session_state.df_missing = df_missing
+        except Exception as e:
+            load_error = str(e)
+
+    if uploaded_file is None:
+        st.session_state.run_state = "ready"
+    elif load_error:
+        st.session_state.run_state = "failed"
+    else:
+        if st.session_state.run_state not in (
+            "completed", "cancelled", "failed", "running", "duplicate_decision"
+        ):
+            st.session_state.run_state = "ready"
+
     render_process_pre(
         uploaded_file=uploaded_file,
         sheet_name=sheet_name,
@@ -197,22 +229,17 @@ with tabs[0]:
         warnings_info=warnings_info,
     )
 
-    # Auth gate — only if not connected
     if not st.session_state.auth_ok:
         render_process_auth_gate()
 
     exec_container = st.container()
     post_container = st.container()
 
-# -------------------------
-# 3) Execution helpers
-# -------------------------
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) Execution helper
+# ─────────────────────────────────────────────────────────────────────────────
 def _execute_api_run(df_to_run):
-    """
-    Run the E2Open API loop for df_to_run and persist results.
-    Captures ref_date, exec_container, and session state from the enclosing scope.
-    """
     st.session_state.run_state = "running"
 
     with exec_container:
@@ -236,7 +263,7 @@ def _execute_api_run(df_to_run):
             _credentials = {
                 "username": st.session_state.e2open_username,
                 "password": st.session_state.e2open_password,
-                "tenant": st.session_state.e2open_tenant,
+                "tenant":   st.session_state.e2open_tenant,
                 "environment": st.session_state.e2open_env,
             }
             failed_df, ok_df, logs = run_api_loop(
@@ -247,17 +274,17 @@ def _execute_api_run(df_to_run):
                 should_cancel=should_cancel,
             )
 
-            st.session_state.logs = logs
+            st.session_state.logs     = logs
             st.session_state.df_failed = failed_df
-            st.session_state.df_ok = ok_df
+            st.session_state.df_ok    = ok_df
 
-            processed = int(ok_df.shape[0] + failed_df.shape[0])
-            missing_n = (int(st.session_state.df_missing.shape[0])
-                         if st.session_state.df_missing is not None else 0)
+            processed  = int(ok_df.shape[0] + failed_df.shape[0])
+            missing_n  = (int(st.session_state.df_missing.shape[0])
+                          if st.session_state.df_missing is not None else 0)
 
-            _account_key = st.session_state.account_key or None
+            _account_key   = st.session_state.account_key   or None
             _account_label = st.session_state.account_label or None
-            _environment = st.session_state.e2open_env or None
+            _environment   = st.session_state.e2open_env    or None
 
             if should_cancel():
                 status.update(label="Cancelled by user.", state="error")
@@ -318,21 +345,21 @@ def _execute_api_run(df_to_run):
             st.exception(e)
 
 
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 4) Handle analyze click
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 if analyze_clicked:
-    st.session_state.last_run_id += 1
+    st.session_state.last_run_id   += 1
     st.session_state.cancel_requested = False
-    st.session_state.logs = []
-    st.session_state.df_merged = None
-    st.session_state.df_failed = None
-    st.session_state.df_ok = None
-    st.session_state.run_summary = None
-    st.session_state.dup_rows = None
-    st.session_state.dup_decision = None
-    st.session_state.run_state = "ready"
-    st.session_state.db_edit_mode = "view"
+    st.session_state.logs          = []
+    st.session_state.df_merged     = None
+    st.session_state.df_failed     = None
+    st.session_state.df_ok         = None
+    st.session_state.run_summary   = None
+    st.session_state.dup_rows      = None
+    st.session_state.dup_decision  = None
+    st.session_state.run_state     = "ready"
+    st.session_state.db_edit_mode  = "view"
     st.session_state.db_editor_base_df = None
 
     if not st.session_state.auth_ok:
@@ -359,19 +386,19 @@ if analyze_clicked:
         if dups is None or dups.empty:
             _execute_api_run(st.session_state.df_clean)
         else:
-            st.session_state.dup_rows = dups
+            st.session_state.dup_rows  = dups
             st.session_state.run_state = "duplicate_decision"
 
 
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 5) Duplicate decision UI
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 if st.session_state.run_state == "duplicate_decision" and st.session_state.dup_rows is not None:
     with tabs[0]:
         with exec_container:
-            dup_n = len(st.session_state.dup_rows)
+            dup_n   = len(st.session_state.dup_rows)
             total_n = len(st.session_state.df_clean) if st.session_state.df_clean is not None else 0
-            new_n = total_n - dup_n
+            new_n   = total_n - dup_n
 
             st.warning(
                 f"**{dup_n} of {total_n} transactions** have already been sent to E2Open "
@@ -382,27 +409,22 @@ if st.session_state.run_state == "duplicate_decision" and st.session_state.dup_r
                                      "hs code", "customs value", "duty paid"]
                          if c in st.session_state.dup_rows.columns]
             with st.expander(f"View {dup_n} duplicate transactions", expanded=False):
-                st.dataframe(st.session_state.dup_rows[show_cols], use_container_width=True)
+                st.dataframe(st.session_state.dup_rows[show_cols], width='stretch')
 
             col1, col2, col3 = st.columns([3, 3, 1])
             with col1:
                 btn_skip = st.button(
                     f"Skip duplicates — send {new_n} new",
-                    type="primary",
-                    key="dup_btn_skip",
-                    disabled=(new_n == 0),
+                    type="primary", key="dup_btn_skip", disabled=(new_n == 0),
                 )
             with col2:
-                btn_all = st.button(
-                    f"Reprocess all — send {total_n}",
-                    key="dup_btn_all",
-                )
+                btn_all = st.button(f"Reprocess all — send {total_n}", key="dup_btn_all")
             with col3:
                 btn_cancel = st.button("Cancel", key="dup_btn_cancel")
 
             if btn_cancel:
                 st.session_state.run_state = "ready"
-                st.session_state.dup_rows = None
+                st.session_state.dup_rows  = None
                 st.rerun()
             elif btn_skip:
                 dup_idx = set(st.session_state.dup_rows.index)
@@ -415,9 +437,10 @@ if st.session_state.run_state == "duplicate_decision" and st.session_state.dup_r
                 st.session_state.dup_decision = "all"
                 _execute_api_run(st.session_state.df_clean)
 
-# -------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 6) Post-run block
-# -------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
     if st.session_state.run_summary is not None:
         with post_container:
@@ -430,12 +453,10 @@ with tabs[0]:
                 run_summary=st.session_state.run_summary,
             )
 
-# -------------------------
-# 4) Results tab
-# -------------------------
-df_merged_all = load_merged_results()
-run_history_df = get_run_history()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 7) Results tab
+# ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
     render_tab_resultados(
         df_merged=df_merged_all,
@@ -447,24 +468,24 @@ with tabs[1]:
         environment=st.session_state.e2open_env,
     )
 
-# -------------------------
-# 5) Opportunities tab
-# -------------------------
-df_initiatives_all = load_initiatives()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 8) Opportunities tab
+# ─────────────────────────────────────────────────────────────────────────────
 with tabs[2]:
     render_tab_opportunities(df_merged=df_merged_all, df_initiatives=df_initiatives_all)
 
-# -------------------------
-# 6) Initiatives tab
-# -------------------------
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 9) Initiatives tab
+# ─────────────────────────────────────────────────────────────────────────────
 with tabs[3]:
     render_tab_initiatives(df_initiatives=df_initiatives_all)
 
-# -------------------------
-# 7) Logs tab
-# -------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10) Logs tab
+# ─────────────────────────────────────────────────────────────────────────────
 _total_queries = get_query_counter(st.session_state.account_key or None)
 
 with tabs[4]:

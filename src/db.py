@@ -147,6 +147,17 @@ _MERGED_NEW_COLS = [
     "cv_currency_original TEXT",
 ]
 
+# Safe migration: columns added to `initiatives` in newer deployments
+_INITIATIVES_NEW_COLS = [
+    "group_id INTEGER",
+    "implementation_date TEXT",
+    "material_number TEXT",
+    "start_date TEXT",
+    "comments TEXT",
+    "potential_reimbursements REAL DEFAULT 0",
+    "group_name TEXT",
+]
+
 
 def _migrate_runs(conn: sqlite3.Connection) -> None:
     for col_def in _RUNS_NEW_COLS:
@@ -164,12 +175,21 @@ def _migrate_merged(conn: sqlite3.Connection) -> None:
             pass
 
 
+def _migrate_initiatives(conn: sqlite3.Connection) -> None:
+    for col_def in _INITIATIVES_NEW_COLS:
+        try:
+            conn.execute(f"ALTER TABLE initiatives ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_DDL)
         conn.executescript(_INITIATIVES_DDL)
         _migrate_runs(conn)
         _migrate_merged(conn)
+        _migrate_initiatives(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +700,8 @@ def _float(v) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 _INITIATIVES_EDITABLE = frozenset({
-    "status", "annual_savings_est", "savings_realized", "reimbursements",
+    "status", "savings_realized", "reimbursements",
+    "implementation_date", "start_date", "comments", "potential_reimbursements",
 })
 
 _INITIATIVES_STATUS_OPTIONS = ["Identified", "Validated", "Discarded", "Completed"]
@@ -698,13 +719,27 @@ def save_initiatives(rows: list) -> int:
                (coo, coi, hs_code, customs_value, duty_paid, default_duties,
                 min_duties, potential_savings, annual_savings_est,
                 savings_realized, reimbursements, status,
-                product, program_description, created_at)
+                product, program_description, created_at,
+                material_number, start_date, comments, potential_reimbursements)
                VALUES
                (:coo, :coi, :hs_code, :customs_value, :duty_paid, :default_duties,
                 :min_duties, :potential_savings, :annual_savings_est,
                 :savings_realized, :reimbursements, :status,
-                :product, :program_description, :created_at)""",
-            [{**r, "created_at": now} for r in rows],
+                :product, :program_description, :created_at,
+                :material_number, :start_date, :comments, :potential_reimbursements)""",
+            [
+                {
+                    "product": "",
+                    "annual_savings_est": 0.0,
+                    "material_number": "",
+                    "start_date": now[:10],
+                    "comments": "",
+                    "potential_reimbursements": 0.0,
+                    **r,
+                    "created_at": now,
+                }
+                for r in rows
+            ],
         )
     return len(rows)
 
@@ -752,3 +787,42 @@ def delete_initiatives(ids: list) -> int:
             [int(i) for i in ids],
         )
     return cur.rowcount
+
+
+def save_group_name(group_id: int, name: str) -> None:
+    """Store a display name for a group on the parent initiative row."""
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE initiatives SET group_name = ? WHERE id = ?",
+            (name.strip() or None, int(group_id)),
+        )
+
+
+def group_initiatives(ids: list) -> int:
+    """Assign a shared group_id (min id) to all given initiative ids."""
+    if len(ids) < 2:
+        return 0
+    init_db()
+    group_id = int(min(ids))
+    placeholders = ", ".join("?" * len(ids))
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE initiatives SET group_id = ? WHERE id IN ({placeholders})",
+            [group_id] + [int(i) for i in ids],
+        )
+    return len(ids)
+
+
+def ungroup_initiatives(ids: list) -> int:
+    """Remove group_id from the given initiative ids."""
+    if not ids:
+        return 0
+    init_db()
+    placeholders = ", ".join("?" * len(ids))
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE initiatives SET group_id = NULL WHERE id IN ({placeholders})",
+            [int(i) for i in ids],
+        )
+    return len(ids)
