@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import streamlit as st
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +160,8 @@ _INITIATIVES_NEW_COLS = [
     "comments TEXT",
     "potential_reimbursements REAL DEFAULT 0",
     "group_name TEXT",
+    "min_duty_rate REAL",
+    "min_duty_program TEXT",
 ]
 
 
@@ -183,13 +189,32 @@ def _migrate_initiatives(conn: sqlite3.Connection) -> None:
             pass
 
 
+_FX_CACHE_DDL = """
+CREATE TABLE IF NOT EXISTS fx_rates_cache (
+    id         INTEGER PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    rates_json TEXT NOT NULL
+);
+"""
+
+_FX_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+
+_DB_READY = False  # module-level flag: schema created + migrations run
+
+
 def init_db() -> None:
+    """Create schema and run migrations. Idempotent: only executes once per process."""
+    global _DB_READY
+    if _DB_READY:
+        return
     with _connect() as conn:
         conn.executescript(_DDL)
         conn.executescript(_INITIATIVES_DDL)
+        conn.executescript(_FX_CACHE_DDL)
         _migrate_runs(conn)
         _migrate_merged(conn)
         _migrate_initiatives(conn)
+    _DB_READY = True
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +230,10 @@ def save_account_label(account_key: str, label: str) -> None:
             "INSERT OR REPLACE INTO account_labels (account_key, label, created_at) VALUES (?, ?, ?)",
             (account_key, label.strip(), now),
         )
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_account_label(account_key: str) -> Optional[str]:
     """Return the stored label for account_key, or None if not found."""
     init_db()
@@ -221,6 +248,7 @@ def get_account_label(account_key: str) -> Optional[str]:
 # Query counter
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_query_counter(account_key: Optional[str] = None) -> int:
     """
     Return total processed queries (ok + failed) across all non-cancelled runs.
@@ -240,6 +268,41 @@ def get_query_counter(account_key: Optional[str] = None) -> int:
                    FROM runs WHERE cancelled = 0"""
             ).fetchone()
     return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# FX rates cache (SQLite-persisted, TTL 4 h)
+# ---------------------------------------------------------------------------
+
+def load_fx_rates() -> Optional[dict]:
+    """Return the most-recently stored FX rates dict if younger than TTL, else None."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT fetched_at, rates_json FROM fx_rates_cache ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        fetched_at = datetime.fromisoformat(row[0])
+        age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+        if age > _FX_CACHE_TTL_SECONDS:
+            return None
+        return json.loads(row[1])
+    except Exception:
+        return None
+
+
+def save_fx_rates(rates: dict) -> None:
+    """Persist FX rates to SQLite, replacing any previous entry."""
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute("DELETE FROM fx_rates_cache")
+        conn.execute(
+            "INSERT INTO fx_rates_cache (fetched_at, rates_json) VALUES (?, ?)",
+            (now, json.dumps(rates)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +363,7 @@ def update_merged_rows(changes: list) -> int:
                 list(safe.values()) + [int(row_id)],
             )
             count += 1
+    st.cache_data.clear()
     return count
 
 
@@ -317,6 +381,7 @@ def delete_merged_rows(ids: list) -> int:
             f"DELETE FROM merged_results WHERE id IN ({placeholders})",
             [int(i) for i in ids],
         )
+    st.cache_data.clear()
     return cur.rowcount
 
 
@@ -324,7 +389,7 @@ def delete_merged_rows(ids: list) -> int:
 # Duplicate detection
 # ---------------------------------------------------------------------------
 
-def find_duplicate_transactions(df: pd.DataFrame, ref_date: str) -> pd.DataFrame:  # noqa: ARG001
+def find_duplicate_transactions(df: pd.DataFrame, ref_date: str = "") -> pd.DataFrame:
     """
     Return the subset of rows in `df` that already exist in merged_results.
 
@@ -507,6 +572,7 @@ def save_run_results(
                 _normalise_merged(df_merged, run_id, ref_date, now),
             )
 
+    st.cache_data.clear()
     return run_id
 
 
@@ -524,7 +590,7 @@ def _normalise_ok(df, run_id, ref_date, saved_at):
         "weight": _float(r.get("weight")),
         "status": _str(r.get("status")), "comment": _str(r.get("comment")),
         "saved_at": saved_at,
-    } for _, r in df.iterrows()]
+    } for r in df.to_dict("records")]
 
 
 def _normalise_failed(df, run_id, ref_date, saved_at):
@@ -536,7 +602,7 @@ def _normalise_failed(df, run_id, ref_date, saved_at):
         "cv_currency": _str(r.get("cv currency")),
         "weight": _float(r.get("weight")),
         "error": _str(r.get("error")), "saved_at": saved_at,
-    } for _, r in df.iterrows()]
+    } for r in df.to_dict("records")]
 
 
 def _normalise_merged(df, run_id, ref_date, saved_at):
@@ -570,87 +636,85 @@ def _normalise_merged(df, run_id, ref_date, saved_at):
         "cv_currency_original": _str(r.get("cv currency original")),
         "input_date": _str(r.get("Input Date")),
         "saved_at": saved_at,
-    } for _, r in df.iterrows()]
+    } for r in df.to_dict("records")]
 
 
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
 
-def load_ok_results(ref_date: Optional[str] = None) -> pd.DataFrame:
-    init_db()
-    q = "SELECT * FROM ok_results" + (" WHERE ref_date = ?" if ref_date else "") + " ORDER BY id"
-    with _connect() as conn:
-        return pd.read_sql_query(q, conn, params=(ref_date,) if ref_date else ())
-
-
-def load_failed_results(ref_date: Optional[str] = None) -> pd.DataFrame:
-    init_db()
-    q = "SELECT * FROM failed_results" + (" WHERE ref_date = ?" if ref_date else "") + " ORDER BY id"
-    with _connect() as conn:
-        return pd.read_sql_query(q, conn, params=(ref_date,) if ref_date else ())
-
-
+@st.cache_data(ttl=60, show_spinner=False)
 def load_merged_results(ref_date: Optional[str] = None) -> pd.DataFrame:
     init_db()
     q = "SELECT * FROM merged_results" + (" WHERE ref_date = ?" if ref_date else "") + " ORDER BY id"
     with _connect() as conn:
         df = pd.read_sql_query(q, conn, params=(ref_date,) if ref_date else ())
-    return df.rename(columns=_MERGED_DB_TO_DF)
+    df = df.rename(columns=_MERGED_DB_TO_DF)
+    return _coerce_merged_dtypes(df)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_run_history() -> pd.DataFrame:
     init_db()
     with _connect() as conn:
-        return pd.read_sql_query("SELECT * FROM runs ORDER BY id DESC", conn)
-
-
-# ---------------------------------------------------------------------------
-# Combine helpers
-# ---------------------------------------------------------------------------
-
-def load_combined_ok_results(current_ok_df: pd.DataFrame) -> pd.DataFrame:
-    historical = load_ok_results()
-    if not historical.empty:
-        historical = historical.rename(columns={"hs_code": "hs code", "customs_value": "customs value", "cv_currency": "cv currency"})
-        keep = ["coo", "coi", "hs code", "customs value", "cv currency", "weight", "status", "comment"]
-        historical = historical[[c for c in keep if c in historical.columns]]
-    frames = [f for f in [historical, current_ok_df] if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True).drop_duplicates(
-        subset=["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
-    )
-
-
-def load_combined_failed_results(current_failed_df: pd.DataFrame) -> pd.DataFrame:
-    historical = load_failed_results()
-    if not historical.empty:
-        historical = historical.rename(columns={"hs_code": "hs code", "customs_value": "customs value", "cv_currency": "cv currency"})
-        keep = ["coo", "coi", "hs code", "customs value", "cv currency", "weight", "error"]
-        historical = historical[[c for c in keep if c in historical.columns]]
-    frames = [f for f in [historical, current_failed_df] if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True).drop_duplicates(
-        subset=["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
-    )
-
-
-def load_combined_merged_results(current_merged_df: pd.DataFrame) -> pd.DataFrame:
-    historical = load_merged_results()
-    frames = [f for f in [historical, current_merged_df] if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    dedup = ["invoice number", "material number", "coo", "coi", "hs code", "Input Date"]
-    available = [c for c in dedup if c in combined.columns] or ["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
-    return combined.drop_duplicates(subset=available)
+        df = pd.read_sql_query("SELECT * FROM runs ORDER BY id DESC", conn)
+    for col in ("id", "total_candidates", "total_ok", "total_failed", "total_missing", "cancelled"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    _str_cols = frozenset({
+        "ref_date", "started_at", "account_key", "account_label", "environment",
+    })
+    return _coerce_string_cols(df, _str_cols)
 
 
 # ---------------------------------------------------------------------------
 # Column mapping: DB → DataFrame
 # ---------------------------------------------------------------------------
+
+# Post-rename float columns (display names after _MERGED_DB_TO_DF rename)
+_MERGED_FLOAT_COLS = frozenset({
+    "customs value", "weight", "duty paid",
+    "Min Duty Rate", "Minimum Duties",
+    "Default Duty Rate", "Default Duties",
+    "customs_value_original",
+})
+# Post-rename integer columns
+_MERGED_INT_COLS = frozenset({"id", "run_id"})
+# Post-rename string columns (cast to pandas "string" dtype for Arrow safety)
+_MERGED_STRING_COLS = frozenset({
+    "ref_date", "date", "invoice number", "material number",
+    "coo", "coi", "hs code",
+    "cv currency", "dp currency",
+    "status", "comment", "hs alternative",
+    "calcName", "incoCalcBasis",
+    "Min Duty Program", "Min Duty Program Description", "Currency Min Duties",
+    "Default Duty Program", "Default Duty Program Description", "Currency Default Duties",
+    "cv_currency_original", "Input Date", "saved_at",
+})
+
+
+def _coerce_string_cols(df: pd.DataFrame, allowed: frozenset) -> pd.DataFrame:
+    """Cast all object-dtype columns to pandas 'string' dtype for Arrow safety.
+    The `allowed` set is checked first; any remaining object columns are also cast."""
+    for col in df.columns:
+        if col in allowed or df[col].dtype == "object":
+            try:
+                df[col] = df[col].astype("string")
+            except (TypeError, ValueError):
+                df[col] = df[col].astype(str).astype("string")
+    return df
+
+
+def _coerce_merged_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure all columns have Arrow-serializable dtypes after load."""
+    for col in _MERGED_FLOAT_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+    for col in _MERGED_INT_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    return _coerce_string_cols(df, _MERGED_STRING_COLS)
+
 
 _MERGED_DB_TO_DF = {
     "invoice_number": "invoice number",
@@ -702,6 +766,7 @@ def _float(v) -> Optional[float]:
 _INITIATIVES_EDITABLE = frozenset({
     "status", "savings_realized", "reimbursements",
     "implementation_date", "start_date", "comments", "potential_reimbursements",
+    "min_duty_program",
 })
 
 _INITIATIVES_STATUS_OPTIONS = ["Identified", "Validated", "Discarded", "Completed"]
@@ -720,13 +785,15 @@ def save_initiatives(rows: list) -> int:
                 min_duties, potential_savings, annual_savings_est,
                 savings_realized, reimbursements, status,
                 product, program_description, created_at,
-                material_number, start_date, comments, potential_reimbursements)
+                material_number, start_date, comments, potential_reimbursements,
+                min_duty_rate, min_duty_program)
                VALUES
                (:coo, :coi, :hs_code, :customs_value, :duty_paid, :default_duties,
                 :min_duties, :potential_savings, :annual_savings_est,
                 :savings_realized, :reimbursements, :status,
                 :product, :program_description, :created_at,
-                :material_number, :start_date, :comments, :potential_reimbursements)""",
+                :material_number, :start_date, :comments, :potential_reimbursements,
+                :min_duty_rate, :min_duty_program)""",
             [
                 {
                     "product": "",
@@ -735,21 +802,38 @@ def save_initiatives(rows: list) -> int:
                     "start_date": now[:10],
                     "comments": "",
                     "potential_reimbursements": 0.0,
+                    "min_duty_rate": 0.0,
+                    "min_duty_program": "",
                     **r,
                     "created_at": now,
                 }
                 for r in rows
             ],
         )
+    st.cache_data.clear()
     return len(rows)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_initiatives() -> pd.DataFrame:
     init_db()
     with _connect() as conn:
-        return pd.read_sql_query(
-            "SELECT * FROM initiatives ORDER BY id DESC", conn
-        )
+        df = pd.read_sql_query("SELECT * FROM initiatives ORDER BY id DESC", conn)
+    for col in ("customs_value", "duty_paid", "default_duties", "min_duties",
+                "potential_savings", "annual_savings_est", "savings_realized",
+                "reimbursements", "potential_reimbursements", "min_duty_rate"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+    for col in ("id", "group_id"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    _str_cols = frozenset({
+        "coo", "coi", "hs_code", "material_number",
+        "min_duty_program", "program_description",
+        "status", "comments", "group_name",
+        "start_date", "implementation_date", "created_at",
+    })
+    return _coerce_string_cols(df, _str_cols)
 
 
 def update_initiatives(changes: list) -> int:
@@ -773,6 +857,7 @@ def update_initiatives(changes: list) -> int:
                 list(safe.values()) + [int(row_id)],
             )
             count += 1
+    st.cache_data.clear()
     return count
 
 
@@ -786,6 +871,7 @@ def delete_initiatives(ids: list) -> int:
             f"DELETE FROM initiatives WHERE id IN ({placeholders})",
             [int(i) for i in ids],
         )
+    st.cache_data.clear()
     return cur.rowcount
 
 
@@ -797,6 +883,7 @@ def save_group_name(group_id: int, name: str) -> None:
             "UPDATE initiatives SET group_name = ? WHERE id = ?",
             (name.strip() or None, int(group_id)),
         )
+    st.cache_data.clear()
 
 
 def group_initiatives(ids: list) -> int:
@@ -811,6 +898,7 @@ def group_initiatives(ids: list) -> int:
             f"UPDATE initiatives SET group_id = ? WHERE id IN ({placeholders})",
             [group_id] + [int(i) for i in ids],
         )
+    st.cache_data.clear()
     return len(ids)
 
 
@@ -825,4 +913,74 @@ def ungroup_initiatives(ids: list) -> int:
             f"UPDATE initiatives SET group_id = NULL WHERE id IN ({placeholders})",
             [int(i) for i in ids],
         )
+    st.cache_data.clear()
     return len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Backup & Restore
+# ---------------------------------------------------------------------------
+
+def backup_db() -> bytes:
+    """Return a consistent binary snapshot of the live database."""
+    db_path = get_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError("Database not found — run an analysis first.")
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with sqlite3.connect(str(db_path)) as src:
+            with sqlite3.connect(str(tmp_path)) as dst:
+                src.backup(dst)
+        return tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+_REQUIRED_TABLES = frozenset({"merged_results", "runs"})
+
+
+def restore_db(data: bytes) -> None:
+    """
+    Replace the live database with the supplied backup bytes.
+    Validates the file before overwriting; auto-saves the current db first.
+    Raises ValueError if the uploaded file is not a valid backup.
+    """
+    db_path = get_db_path()
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+
+    try:
+        # Validate: must be a readable SQLite file with the expected tables
+        try:
+            conn = sqlite3.connect(str(tmp_path))
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            conn.close()
+        except Exception as exc:
+            raise ValueError(f"Not a valid SQLite file: {exc}") from exc
+
+        missing = _REQUIRED_TABLES - tables
+        if missing:
+            raise ValueError(f"Backup is missing required tables: {', '.join(sorted(missing))}")
+
+        # Auto-save the current db before overwriting
+        if db_path.exists():
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            auto_bk = db_path.with_name(f"duty_cockpit_pre_restore_{stamp}.db")
+            shutil.copy2(db_path, auto_bk)
+
+        shutil.copy2(tmp_path, db_path)
+        # Reset the init flag so migrations re-run against the restored DB
+        global _DB_READY
+        _DB_READY = False
+        init_db()
+        st.cache_data.clear()
+    finally:
+        tmp_path.unlink(missing_ok=True)

@@ -13,6 +13,8 @@ Architecture:
      multiprocessing quirks that break Streamlit's async server)
 -----------------------------------------------------------
 """
+import logging
+import logging.handlers
 import os
 import socket
 import subprocess
@@ -22,6 +24,37 @@ import threading
 import webbrowser
 
 _WORKER_ENV = "_DUTYCOCKPIT_WORKER"
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+def _setup_logging(log_dir: str) -> None:
+    """Configure a rotating file logger beside the exe. Called early in both
+    the main (Tkinter) process and the worker (Streamlit) process."""
+    log_path = os.path.join(log_dir, "duty_cockpit.log")
+    handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.root.setLevel(logging.WARNING)
+    logging.root.addHandler(handler)
+
+
+def _setup_excepthook() -> None:
+    """Route uncaught exceptions to the log file so crashes on analyst machines
+    can be diagnosed after the fact."""
+    _log = logging.getLogger("launcher")
+
+    def _hook(exc_type, exc_value, exc_tb):
+        _log.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +278,9 @@ def main() -> None:
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()   # no-op unless started by multiprocessing
+
+    _setup_logging(_exe_dir())
+    _setup_excepthook()
 
     if os.environ.get(_WORKER_ENV):
         _run_as_worker()

@@ -32,11 +32,22 @@ def _fetch_fx_rates_eur() -> dict:
     Returns {currency_code: rate_to_eur} — EUR per 1 unit of that currency.
     EUR itself is always 1.0.
     No business data is sent to any endpoint.
-    Result is cached in-process to avoid repeated HTTP calls on Streamlit re-renders.
+    Result is cached in-process AND persisted to SQLite (TTL 4 h) so it
+    survives process restarts without a network call.
     """
     global _FX_CACHE
     if _FX_CACHE is not None:
         return _FX_CACHE
+
+    # Check SQLite cache before hitting the network
+    try:
+        from src.db import load_fx_rates, save_fx_rates as _save_fx
+        _db_rates = load_fx_rates()
+        if _db_rates is not None:
+            _FX_CACHE = _db_rates
+            return _FX_CACHE
+    except Exception:
+        _save_fx = None  # DB unavailable — proceed to network fetch
 
     import urllib.request
     import json
@@ -49,6 +60,11 @@ def _fetch_fx_rates_eur() -> dict:
             rates = parser(data)
             rates["EUR"] = 1.0
             _FX_CACHE = rates
+            try:
+                if _save_fx is not None:
+                    _save_fx(rates)
+            except Exception:
+                pass  # DB write failure must not abort the run
             return _FX_CACHE
         except Exception as e:
             last_err = f"{name}: {e}"
@@ -103,16 +119,41 @@ def _find_column(df_lower: pd.DataFrame, desired_lower: str) -> Optional[str]:
 # Carga Excel (cacheada en app.py vía st.cache_data indirectamente)
 # -----------------------------
 
+_REQUIRED_COLUMNS = [
+    "coo", "coi", "hs code", "customs value", "duty paid",
+    "material number", "cv currency", "dp currency",
+]
+# "weight" is optional — defaults to 1.0 if absent
+
+
 def load_transactions_excel(uploaded_file, sheet_name: str = "Transactions") -> pd.DataFrame:
-    # uploaded_file: st.uploaded_file (bytes-like)
-    df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+    try:
+        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+    except Exception as exc:
+        msg = str(exc)
+        if "Worksheet" in msg or "sheet" in msg.lower():
+            raise ValueError(
+                f"Sheet '{sheet_name}' not found in the uploaded file. "
+                f"Check the sheet name and try again."
+            ) from exc
+        raise
+
+    df_lower = _to_lower_columns(df)
+    missing = [c for c in _REQUIRED_COLUMNS if _find_column(df_lower, c) is None]
+    if missing:
+        found = list(df_lower.columns)
+        raise ValueError(
+            f"Missing required columns in sheet '{sheet_name}': {missing}.\n"
+            f"Expected: {_REQUIRED_COLUMNS}.\n"
+            f"Found: {found}"
+        )
     return df
 
 # -----------------------------
 # Estandarización Currencies + Validación + limpieza
 # -----------------------------
 
-def _convert_customs_value_to_eur(df: pd.DataFrame) -> pd.DataFrame:
+def _convert_customs_value_to_eur(df: pd.DataFrame) -> Tuple[pd.DataFrame, list]:
     """
     Convert df['customs value'] from df['cv currency'] to EUR using Frankfurter API.
     Does NOT change business logic elsewhere; it only standardizes values/currency.
@@ -132,19 +173,21 @@ def _convert_customs_value_to_eur(df: pd.DataFrame) -> pd.DataFrame:
     out["customs value original"] = out["customs value"]
     out["cv currency original"] = out["cv currency"]
 
-    fx_map = _fetch_fx_rates_eur()
+    try:
+        fx_map = _fetch_fx_rates_eur()
+    except Exception:
+        fx_map = {}
+
     rates = out["cv currency"].map(fx_map)
     missing = rates.isna()
+    missing_ccy: list[str] = []
     if missing.any():
         missing_ccy = sorted(out.loc[missing, "cv currency"].dropna().unique().tolist())
-        raise ValueError(
-            f"Missing FX rate(s) for currency codes: {missing_ccy}. "
-            "These currencies are not available in the Frankfurter API."
-        )
+        rates = rates.fillna(1.0)  # pass-through: no conversion, value kept as-is
 
     out["customs value"] = (pd.to_numeric(out["customs value"], errors="coerce").fillna(0.0) * rates).round(2)
-    out["cv currency"] = "EUR"
-    return out
+    out["cv currency"] = out["cv currency"].where(~missing, other=out["cv currency original"])
+    return out, missing_ccy
 
 def validate_and_clean_transactions(
     df_original: pd.DataFrame,
@@ -172,22 +215,29 @@ def validate_and_clean_transactions(
         }
 
     # Asegurar columnas clave
-    required = ["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
-    missing_required = [c for c in required if _find_column(df, c) is None]
+    missing_required = [c for c in _REQUIRED_COLUMNS if _find_column(df, c) is None]
     if missing_required:
         raise ValueError(
-            f"Faltan columnas requeridas en la hoja: {missing_required}. "
-            "Se esperaban al menos: coo, coi, hs code, customs value, cv currency, weight."
+            f"Missing required columns in sheet: {missing_required}. "
+            f"Expected: {_REQUIRED_COLUMNS}."
         )
 
     # Normalizar nombres esperados (en caso de variantes mínimas)
     colmap = {}
-    for c in required:
+    for c in _REQUIRED_COLUMNS:
         colmap[_find_column(df, c)] = c
     df = df.rename(columns=colmap)
 
-    # Limpiezas base 
-    df["weight"] = df["weight"].apply(_clean_weight)
+    # Weight es opcional — default 1.0 si la columna no existe
+    _weight_col = _find_column(df, "weight")
+    if _weight_col is not None:
+        if _weight_col != "weight":
+            df = df.rename(columns={_weight_col: "weight"})
+        df["weight"] = df["weight"].apply(_clean_weight)
+    else:
+        df["weight"] = 1.0
+
+    # Limpiezas base
     df["customs value"] = df["customs value"].apply(_clean_customs_value)
     df["hs code"] = df["hs code"].apply(_clean_hs)
     df["coo"] = df["coo"].apply(_clean_country)
@@ -195,7 +245,7 @@ def validate_and_clean_transactions(
     df["cv currency"] = df["cv currency"].astype(str).str.strip().str.upper()
 
     # Standardize all transactions to EUR (using local FX file)
-    df = _convert_customs_value_to_eur(df)
+    df, _fx_missing = _convert_customs_value_to_eur(df)
 
     # df_missing: COO/COI/HS vacíos o customs value 0
     df_missing = df[
@@ -228,12 +278,17 @@ def validate_and_clean_transactions(
 
         if hs_ratio < 0.95:
             warnings.append(
-                f"Warning: solo {hs_ratio*100:.1f}% de HS Code tienen >=6 dígitos (umbral 95%)."
+                f"Warning: only {hs_ratio*100:.1f}% of HS Codes have >=6 digits (threshold: 95%)."
             )
         if iso_ratio < 0.95:
             warnings.append(
-                f"Warning: solo {iso_ratio*100:.1f}% de COO/COI cumplen ISO-2 (umbral 95%)."
+                f"Warning: only {iso_ratio*100:.1f}% of COO/COI values are ISO-2 compliant (threshold: 95%)."
             )
+
+    if _fx_missing:
+        warnings.append(
+            f"FX rate not found for: {', '.join(_fx_missing)}. Values kept in original currency (no EUR conversion)."
+        )
 
     warnings_info = {
         "hs_ratio": hs_ratio,
@@ -245,7 +300,20 @@ def validate_and_clean_transactions(
         "rows_missing": int(len(df_missing)),
     }
 
-    return df_ok, df_missing, warnings_info
+    return _arrow_safe(df_ok), _arrow_safe(df_missing), warnings_info
+
+
+def _arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """Cast object columns to pandas 'string' dtype for safe Arrow serialization."""
+    if df is None or df.empty:
+        return df
+    for col in df.columns:
+        if df[col].dtype == "object":
+            try:
+                df[col] = df[col].astype("string")
+            except (TypeError, ValueError):
+                df[col] = df[col].astype(str).astype("string")
+    return df
 
 # -----------------------------
 # API loop + logs
@@ -382,200 +450,168 @@ def run_api_loop(
     return failed_df, ok_df, logs
 
 # -----------------------------
-# Postproceso (df_min + df_merged) sin guardar archivos
+# Postproceso helpers
 # -----------------------------
 
-def postprocess_results(
-    ok_input_df: pd.DataFrame,
-    ok_df: pd.DataFrame,
-    failed_df: pd.DataFrame,
-    df_missing: pd.DataFrame,
-    ref_date: str,
-    logs: List[Dict[str, Any]],
-) -> pd.DataFrame:
-    
-    # Recuperar session.output desde logs
-    session_output = None
+def _extract_session_output(logs: List[Dict[str, Any]]) -> dict:
     for item in reversed(logs):
         if item.get("event") == "session_output":
-            session_output = item.get("payload")
-            break
+            return item.get("payload") or {}
+    return {}
 
-    if session_output is None:
-        session_output = {}
 
-    df_raw = pd.DataFrame.from_dict(session_output).T if session_output else pd.DataFrame()
-
-    # Construir failed_df combinado(missing + api_failed)
-    # Normalizar llaves de failed para poder filtrar
-    def clean_country(x: Any) -> str:
-        if pd.isna(x) or str(x).strip() == "":
-            return ""
-        return str(x).strip().upper()
-
-    def clean_hs(x: Any) -> str:
-        return re.sub(r"\D", "", str(x)).strip()
-
-    combined_failed = pd.DataFrame(columns=["COO", "COI", "HS Code", "Customs Value"])
+def _build_combined_failed(
+    failed_df: Optional[pd.DataFrame],
+    df_missing: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    combined = pd.DataFrame(columns=["COO", "COI", "HS Code", "Customs Value"])
 
     if failed_df is not None and not failed_df.empty:
-        api_failed_df = failed_df.copy()
-        # Normalizar columnas
+        af = failed_df.copy()
         for col in ["coo", "coi", "hs code", "customs value"]:
-            if col not in api_failed_df.columns:
-                api_failed_df[col] = ""
-        api_failed_df = api_failed_df[["coo", "coi", "hs code", "customs value"]].rename(
+            if col not in af.columns:
+                af[col] = ""
+        af = af[["coo", "coi", "hs code", "customs value"]].rename(
             columns={"coo": "COO", "coi": "COI", "hs code": "HS Code", "customs value": "Customs Value"}
         )
-        api_failed_df["COO"] = api_failed_df["COO"].apply(clean_country)
-        api_failed_df["COI"] = api_failed_df["COI"].apply(clean_country)
-        api_failed_df["HS Code"] = api_failed_df["HS Code"].apply(clean_hs)
-        api_failed_df["Customs Value"] = pd.to_numeric(api_failed_df["Customs Value"], errors="coerce").round(2)
-        combined_failed = pd.concat([combined_failed, api_failed_df], ignore_index=True)
+        af["COO"] = af["COO"].apply(_clean_country)
+        af["COI"] = af["COI"].apply(_clean_country)
+        af["HS Code"] = af["HS Code"].apply(_clean_hs)
+        af["Customs Value"] = pd.to_numeric(af["Customs Value"], errors="coerce").round(2)
+        frames = [f for f in [combined, af] if not f.empty]
+        combined = pd.concat(frames, ignore_index=True) if frames else combined
 
     if df_missing is not None and not df_missing.empty:
-        miss = df_missing.copy()
-        # asegurar nombres
-        if "coo" in miss.columns:
-            miss = miss.rename(columns={"coo": "COO"})
-        if "coi" in miss.columns:
-            miss = miss.rename(columns={"coi": "COI"})
-        if "hs code" in miss.columns:
-            miss = miss.rename(columns={"hs code": "HS Code"})
-        if "customs value" in miss.columns:
-            miss = miss.rename(columns={"customs value": "Customs Value"})
+        miss = df_missing.copy().rename(columns={
+            "coo": "COO", "coi": "COI", "hs code": "HS Code", "customs value": "Customs Value"
+        })
         for col in ["COO", "COI", "HS Code", "Customs Value"]:
             if col not in miss.columns:
                 miss[col] = ""
         miss = miss[["COO", "COI", "HS Code", "Customs Value"]].copy()
-
-        miss["COO"] = miss["COO"].apply(clean_country)
-        miss["COI"] = miss["COI"].apply(clean_country)
-        miss["HS Code"] = miss["HS Code"].apply(clean_hs)
+        miss["COO"] = miss["COO"].apply(_clean_country)
+        miss["COI"] = miss["COI"].apply(_clean_country)
+        miss["HS Code"] = miss["HS Code"].apply(_clean_hs)
         miss["Customs Value"] = pd.to_numeric(miss["Customs Value"], errors="coerce").round(2)
-        combined_failed = pd.concat([combined_failed, miss], ignore_index=True)
+        combined = pd.concat([combined, miss], ignore_index=True)
 
-    combined_failed = combined_failed.dropna(how="all")
+    return combined.dropna(how="all")
 
-    # Excluir fallidas del df_in 
-    df_in = ok_input_df.copy()
-    if not combined_failed.empty:
-        df_fail = df_in.merge(
-            combined_failed[["COO", "COI", "HS Code"]],
-            left_on=["coo", "coi", "hs code"],
-            right_on=["COO", "COI", "HS Code"],
+
+def _filter_failed_from_inputs(
+    df_in: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    combined_failed: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if combined_failed.empty:
+        return df_in, df_raw
+
+    fail_keys = combined_failed[["COO", "COI", "HS Code"]]
+
+    merged_in = df_in.merge(
+        fail_keys,
+        left_on=["coo", "coi", "hs code"],
+        right_on=["COO", "COI", "HS Code"],
+        how="left",
+        indicator=True,
+    )
+    df_in = merged_in[merged_in["_merge"] == "left_only"].drop(
+        columns=["_merge", "COO", "COI", "HS Code"]
+    )
+
+    if not df_raw.empty:
+        merged_raw = df_raw.merge(
+            fail_keys.rename(columns={"HS Code": "hs"}),
+            left_on=["coo", "coi", "hs"],
+            right_on=["COO", "COI", "hs"],
             how="left",
             indicator=True,
         )
-        df_in = df_fail[df_fail["_merge"] == "left_only"].drop(columns=["_merge", "COO", "COI", "HS Code"])
+        df_raw = merged_raw[merged_raw["_merge"] == "left_only"].drop(
+            columns=["_merge", "COO", "COI"]
+        )
 
-        if not df_raw.empty:
-            df_fail1 = df_raw.merge(
-                combined_failed[["COO", "COI", "HS Code"]].rename(columns={"HS Code": "hs"}),
-                left_on=["coo", "coi", "hs"],
-                right_on=["COO", "COI", "hs"],
-                how="left",
-                indicator=True,
-            )
-            df_raw = df_fail1[df_fail1["_merge"] == "left_only"].drop(columns=["_merge", "COO", "COI"])
+    return df_in, df_raw
 
-    # Preprocesado para df_min
-    data_types = {
-        "coo": "object",
-        "coi": "object",
-        "hs": "object",
-        "custUnitP": "float64",
-        "cur": "object",
-        "qnty": "float64",
-        "status": "object",
-        "comment": "object",
-        "hsNum": "object",
-        "calcName": "object",
-        "incoCalcBasis": "object",
-        "Program": "object",
-        "ratePct": "float64",
-        "rateDesc": "object",
-        "calcVal": "float64",
-        "calcValCur": "object",
+
+def _compute_min_duties(df_raw: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Process raw API session output into a per-lane minimum-duty DataFrame."""
+    _DATA_TYPES: Dict[str, str] = {
+        "coo": "object", "coi": "object", "hs": "object",
+        "custUnitP": "float64", "cur": "object", "qnty": "float64",
+        "status": "object", "comment": "object", "hsNum": "object",
+        "calcName": "object", "incoCalcBasis": "object", "Program": "object",
+        "ratePct": "float64", "rateDesc": "object",
+        "calcVal": "float64", "calcValCur": "object",
     }
 
-    if df_raw.empty:
-        # Si no hubo respuestas, devolver df_in vacío mergeado (sin columnas duty)
-        return df_in.copy()
-
     df = df_raw.copy()
-    # Quitar filas sin Program (error/no data)
     if "Program" in df.columns:
         df = df[~df["Program"].isna()].copy()
 
-    # Asegurar columnas requeridas
-    df = df[[c for c in data_types.keys() if c in df.columns]].copy()
-    for c, t in data_types.items():
-        if c in df.columns:
+    df = df[[c for c in _DATA_TYPES if c in df.columns]].copy()
+    for col, dtype in _DATA_TYPES.items():
+        if col in df.columns:
             try:
-                df[c] = df[c].astype(t)
+                df[col] = df[col].astype(dtype)
             except Exception:
-                # si falla casteo, lo dejamos como está
                 pass
 
-    # Fill object nans
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].fillna("")
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].fillna("").infer_objects(copy=False)
 
     df = df.rename(columns={"hsNum": "hs alternative", "hs": "hs code"})
 
-    # Min duty por lane
     df_duty = df[df.get("calcName", "") == "DUTY"].copy()
     if df_duty.empty:
-        # Sin DUTY, devolvemos df_in (sin enriquecer)
-        return df_in.copy()
+        return None
 
     group_cols = ["coo", "coi", "hs code", "custUnitP", "cur", "qnty"]
     df_min = df_duty.loc[df_duty.groupby(group_cols)["calcVal"].idxmin()].copy()
+    df_min = df_min.rename(columns={
+        "custUnitP": "customs value", "cur": "cv currency", "qnty": "weight",
+        "Program": "Min Duty Program", "ratePct": "Min Duty Rate",
+        "rateDesc": "Min Duty Program Description",
+        "calcVal": "Minimum Duties", "calcValCur": "Currency Min Duties",
+    })
 
-    df_min = df_min.rename(
-        columns={
-            "custUnitP": "customs value",
-            "cur": "cv currency",
-            "qnty": "weight",
-            "Program": "Min Duty Program",
-            "ratePct": "Min Duty Rate",
-            "rateDesc": "Min Duty Program Description",
-            "calcVal": "Minimum Duties",
-            "calcValCur": "Currency Min Duties",
-        }
-    )
-
-    # Default/MFN best
-    df_default_mfn = df_duty[df_duty["Program"].astype(str).str.upper().isin(["DEFAULT", "MOST FAVOURED NATION (MFN)"])].copy()
+    df_default_mfn = df_duty[
+        df_duty["Program"].astype(str).str.upper().isin(["DEFAULT", "MOST FAVOURED NATION (MFN)"])
+    ].copy()
     if not df_default_mfn.empty:
-        df_default_mfn = df_default_mfn.rename(columns={"custUnitP": "customs value", "cur": "cv currency", "qnty": "weight"})
+        df_default_mfn = df_default_mfn.rename(columns={
+            "custUnitP": "customs value", "cur": "cv currency", "qnty": "weight"
+        })
         merge_cols = ["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
-        df_def_min = df_default_mfn.loc[df_default_mfn.groupby(merge_cols)["calcVal"].idxmin()].copy()
-        df_def_min = df_def_min.rename(
-            columns={
-                "ratePct": "Default Duty Rate",
-                "rateDesc": "Default Duty Program Description",
-                "calcVal": "Default Duties",
-                "calcValCur": "Currency Default Duties",
-            }
-        )
+        df_def_min = df_default_mfn.loc[
+            df_default_mfn.groupby(merge_cols)["calcVal"].idxmin()
+        ].copy()
+        df_def_min = df_def_min.rename(columns={
+            "ratePct": "Default Duty Rate",
+            "rateDesc": "Default Duty Program Description",
+            "calcVal": "Default Duties",
+            "calcValCur": "Currency Default Duties",
+        })
         df_def_min["Default Duty Program"] = df_def_min["Program"]
-
         df_min = df_min.merge(
             df_def_min[merge_cols + [
-                "Default Duty Program",
-                "Default Duty Rate",
-                "Default Duty Program Description",
-                "Default Duties",
-                "Currency Default Duties",
+                "Default Duty Program", "Default Duty Rate",
+                "Default Duty Program Description", "Default Duties", "Currency Default Duties",
             ]],
             on=merge_cols,
             how="left",
         )
 
-    # Merge final con input
+    return df_min
+
+
+def _assemble_merged(
+    df_in: pd.DataFrame,
+    df_min: pd.DataFrame,
+    ref_date: str,
+) -> pd.DataFrame:
+    df_min = df_min.copy()
     df_min["Input Date"] = ref_date
 
     df_merged = pd.merge(
@@ -586,47 +622,35 @@ def postprocess_results(
     )
 
     col_order = [
-        "date",
-        "invoice number",
-        "material number",
-        "coo",
-        "coi",
-        "hs code",
-        "customs value",
-        "cv currency",
-        "weight",
-        "duty paid",
-        "dp currency",
-        "status",
-        "comment",
-        "hs alternative",
-        "calcName",
-        "incoCalcBasis",
-        "Min Duty Program",
-        "Min Duty Rate",
-        "Min Duty Program Description",
-        "Minimum Duties",
-        "Currency Min Duties",
-        "Default Duty Program",
-        "Default Duty Rate",
-        "Default Duty Program Description",
-        "Default Duties",
-        "Currency Default Duties",
+        "date", "invoice number", "material number",
+        "coo", "coi", "hs code", "customs value", "cv currency", "weight",
+        "duty paid", "dp currency", "status", "comment", "hs alternative",
+        "calcName", "incoCalcBasis",
+        "Min Duty Program", "Min Duty Rate", "Min Duty Program Description",
+        "Minimum Duties", "Currency Min Duties",
+        "Default Duty Program", "Default Duty Rate", "Default Duty Program Description",
+        "Default Duties", "Currency Default Duties",
         "Input Date",
+        # Required for duplicate detection — must survive to DB save
+        "customs value original", "cv currency original",
     ]
     df_merged = df_merged[[c for c in col_order if c in df_merged.columns]]
 
-    # tipos numéricos
     if "customs value" in df_merged.columns:
         df_merged["customs value"] = pd.to_numeric(df_merged["customs value"], errors="coerce")
     if "weight" in df_merged.columns:
         df_merged["weight"] = pd.to_numeric(df_merged["weight"], errors="coerce")
 
-    # Convert all remaining monetary columns to EUR via Frankfurter / ECB API
-    # Uses Series.where() to avoid .loc chained-assignment issues in pandas 2.x
+    return df_merged
+
+
+def _convert_result_currencies(
+    df_merged: pd.DataFrame,
+    logs: List[Dict[str, Any]],
+) -> pd.DataFrame:
     try:
         fx_map = _fetch_fx_rates_eur()
-        df_merged = df_merged.copy()  # ensure we own this DataFrame before writing
+        df_merged = df_merged.copy()
         for val_col, ccy_col in [
             ("duty paid", "dp currency"),
             ("Minimum Duties", "Currency Min Duties"),
@@ -638,7 +662,9 @@ def postprocess_results(
             rate = ccy.map(fx_map)
             val = pd.to_numeric(df_merged[val_col], errors="coerce")
             no_rate = rate.isna()
-            missing_ccy = sorted(ccy[no_rate & ccy.notna() & (ccy != "NAN") & (ccy != "")].unique().tolist())
+            missing_ccy = sorted(
+                ccy[no_rate & ccy.notna() & (ccy != "NAN") & (ccy != "")].unique().tolist()
+            )
             if missing_ccy:
                 logs.append({"event": "fx_missing_currency", "col": val_col, "currencies": missing_ccy})
             df_merged[val_col] = val.where(no_rate, (val * rate).round(2))
@@ -646,12 +672,45 @@ def postprocess_results(
     except Exception as _fx_err:
         logs.append({
             "event": "fx_conversion_warning",
-            "ts": __import__("datetime").datetime.utcnow().isoformat(),
+            "ts": time.time(),
             "error": str(_fx_err),
         })
+    return df_merged
+
+
+# -----------------------------
+# Postproceso (orchestrator)
+# -----------------------------
+
+def postprocess_results(
+    ok_input_df: pd.DataFrame,
+    ok_df: pd.DataFrame,
+    failed_df: pd.DataFrame,
+    df_missing: pd.DataFrame,
+    ref_date: str,
+    logs: List[Dict[str, Any]],
+) -> pd.DataFrame:
+    session_output = _extract_session_output(logs)
+    df_raw = pd.DataFrame.from_dict(session_output).T if session_output else pd.DataFrame()
+
+    combined_failed = _build_combined_failed(failed_df, df_missing)
+    df_in, df_raw = _filter_failed_from_inputs(ok_input_df.copy(), df_raw, combined_failed)
+
+    if df_raw.empty:
+        return df_in.copy()
+
+    df_min = _compute_min_duties(df_raw)
+    if df_min is None:
+        return df_in.copy()
+
+    df_merged = _assemble_merged(df_in, df_min, ref_date)
+    df_merged = _convert_result_currencies(df_merged, logs)
 
     return df_merged
 
+
+# Max rows shown in the HTML report's results table; a notice is appended when truncated.
+REPORT_ROW_CAP = 500
 
 # -----------------------------
 # HTML Report generator
@@ -665,9 +724,10 @@ def build_report_html(
     ref_date: str,
     account_label: str = "",
     environment: str = "",
+    df_initiatives: Optional[pd.DataFrame] = None,
 ) -> bytes:
     """
-    Build a self-contained HTML report summarising API run results.
+    Build a self-contained HTML report summarising API run results and initiative portfolio.
     Returns UTF-8-encoded bytes ready for st.download_button.
     """
     import datetime
@@ -702,11 +762,7 @@ def build_report_html(
         v = float(v)
         sign = "-" if v < 0 else ""
         av = abs(v)
-        if av >= 1_000_000:
-            return f"{sign}€{av/1_000_000:.2f}M"
-        if av >= 1_000:
-            return f"{sign}€{av/1_000:.1f}k"
-        return f"{sign}€{av:,.2f}"
+        return f"{sign}€{int(round(av)):,}"
 
     def _int(v):
         try:
@@ -821,8 +877,8 @@ def build_report_html(
         "status", "comment",
     ]
     display_cols = [c for c in KEY_COLS if c in df.columns]
-    df_disp = df[display_cols].head(500) if display_cols else df.head(500)
-    truncated = len(df) > 500
+    df_disp = df[display_cols].head(REPORT_ROW_CAP) if display_cols else df.head(REPORT_ROW_CAP)
+    truncated = len(df) > REPORT_ROW_CAP
 
     res_headers = "".join(f"<th>{_e(c)}</th>" for c in df_disp.columns)
     MONEY_RESULT_COLS = {"customs value", "duty paid", "Minimum Duties", "Default Duties"}
@@ -836,25 +892,119 @@ def build_report_html(
         res_rows += f"<tr>{cells}</tr>"
 
     trunc_badge = (
-        f"<span class='badge warn'>First 500 of {_int(len(df))} rows</span>"
+        f"<span class='badge warn'>First {REPORT_ROW_CAP} of {_int(len(df))} rows</span>"
         if truncated else ""
     )
+
+    # ── Initiative portfolio metrics ──────────────────────────────────────────
+    _ini = df_initiatives.copy() if (df_initiatives is not None and not df_initiatives.empty) else pd.DataFrame()
+    if not _ini.empty:
+        for _ic in ["duty_paid", "min_duties", "savings_realized", "reimbursements", "potential_reimbursements"]:
+            if _ic in _ini.columns:
+                _ini[_ic] = pd.to_numeric(_ini[_ic], errors="coerce").fillna(0.0)
+        _ini["_pre_op"] = (_ini["duty_paid"] - _ini["min_duties"]).clip(lower=0) if "duty_paid" in _ini.columns else 0.0
+        _sr = _ini["savings_realized"] if "savings_realized" in _ini.columns else pd.Series([0.0]*len(_ini), index=_ini.index)
+        _rb = _ini["reimbursements"] if "reimbursements" in _ini.columns else pd.Series([0.0]*len(_ini), index=_ini.index)
+        _ini["_realized"] = _sr.fillna(0.0) + _rb.fillna(0.0)
+        ini_n           = len(_ini)
+        ini_identified  = int((_ini.get("status", pd.Series()) == "Identified").sum())
+        ini_validated   = int((_ini.get("status", pd.Series()) == "Validated").sum())
+        ini_completed   = int((_ini.get("status", pd.Series()) == "Completed").sum())
+        ini_discarded   = int((_ini.get("status", pd.Series()) == "Discarded").sum())
+        ini_pre_total   = float(_ini["_pre_op"].sum())
+        ini_real_total  = float(_ini["_realized"].sum())
+        ini_reimb_total = float(_rb.fillna(0.0).sum())
+        ini_rate        = (ini_real_total / ini_pre_total * 100) if ini_pre_total > 0 else None
+
+        # Status breakdown table
+        _st_rows = ""
+        for _st in ["Identified", "Validated", "Completed", "Discarded"]:
+            _sm = _ini[_ini.get("status", pd.Series()) == _st] if "status" in _ini.columns else pd.DataFrame()
+            if _sm.empty:
+                continue
+            _n  = len(_sm)
+            _pr = float(_sm["_pre_op"].sum())
+            _re = float(_sm["_realized"].sum())
+            _pct_re = f"{_re/_pr*100:.0f}%" if _pr > 0 else "—"
+            _color = {"Identified": "#7500C0", "Validated": "#A100FF", "Completed": "#1a7a40", "Discarded": "#888"}.get(_st, "#333")
+            _st_rows += (
+                f"<tr><td><span style='background:{_color};color:#fff;padding:2px 10px;"
+                f"border-radius:999px;font-size:11px;font-weight:700;'>{_e(_st)}</span></td>"
+                f"<td class='num'>{_int(_n)}</td>"
+                f"<td class='num'>{_eur(_pr)}</td>"
+                f"<td class='num'>{_eur(_re)}</td>"
+                f"<td class='num'>{_pct_re}</td></tr>"
+            )
+        ini_status_table = (
+            f"<table><thead><tr>"
+            f"<th>Status</th><th>Initiatives</th>"
+            f"<th>Overpaid PRE (€)</th><th>Savings Realized (€)</th><th>Realization Rate</th>"
+            f"</tr></thead><tbody>{_st_rows}</tbody></table>"
+            if _st_rows else "<p class='no-data'>No initiative data available.</p>"
+        )
+
+        # Top initiatives table (top 15 by PRE overpaid)
+        _top_ini = _ini.nlargest(15, "_pre_op") if not _ini.empty else pd.DataFrame()
+        _top_rows = ""
+        for _, _tr in _top_ini.iterrows():
+            _tst = str(_tr.get("status", ""))
+            _tcolor = {"Identified": "#7500C0", "Validated": "#A100FF", "Completed": "#1a7a40", "Discarded": "#888"}.get(_tst, "#333")
+            _top_rows += (
+                f"<tr>"
+                f"<td>{_e(str(_tr.get('coo','') or ''))}</td>"
+                f"<td>{_e(str(_tr.get('coi','') or ''))}</td>"
+                f"<td>{_e(str(_tr.get('hs_code','') or ''))}</td>"
+                f"<td>{_e(str(_tr.get('min_duty_program','') or ''))}</td>"
+                f"<td><span style='background:{_tcolor};color:#fff;padding:2px 8px;"
+                f"border-radius:999px;font-size:11px;font-weight:700;'>{_e(_tst)}</span></td>"
+                f"<td class='num'>{_eur(_tr['_pre_op'])}</td>"
+                f"<td class='num'>{_eur(_tr['_realized'])}</td>"
+                f"</tr>"
+            )
+        ini_top_table = (
+            f"<table><thead><tr>"
+            f"<th>COO</th><th>COI</th><th>HS Code</th><th>Min Duty Program</th><th>Status</th>"
+            f"<th>Overpaid PRE (€)</th><th>Savings Realized (€)</th>"
+            f"</tr></thead><tbody>{_top_rows}</tbody></table>"
+            if _top_rows else "<p class='no-data'>No initiatives to display.</p>"
+        )
+
+        ini_narrative = (
+            f"The initiative portfolio comprises <strong>{_int(ini_n)} active initiative(s)</strong> "
+            f"across {_int(ini_identified)} Identified, {_int(ini_validated)} Validated, "
+            f"{_int(ini_completed)} Completed and {_int(ini_discarded)} Discarded. "
+            f"The aggregate duty overpayment identified at inception (PRE) amounts to "
+            f"<strong>{_eur(ini_pre_total)}</strong>, of which <strong>{_eur(ini_real_total)}</strong> "
+            f"has been realised to date"
+            + (f" — a realization rate of <strong>{_pct(ini_rate)}</strong>" if ini_rate is not None else "")
+            + f". Reimbursements collected total <strong>{_eur(ini_reimb_total)}</strong>."
+        )
+    else:
+        ini_n = ini_identified = ini_validated = ini_completed = ini_discarded = 0
+        ini_pre_total = ini_real_total = ini_reimb_total = 0.0
+        ini_rate = None
+        ini_status_table = "<p class='no-data'>No initiative data available for this report.</p>"
+        ini_top_table    = "<p class='no-data'>No initiatives to display.</p>"
+        ini_narrative    = "No initiative data is available for this reporting period."
 
     # ── Narrative paragraph ───────────────────────────────────────────────────
     fail_txt = (
         f", with <strong>{_int(failed_n)} failure(s)</strong>"
-        f" and <strong>{_int(missing_n)} row(s) skipped</strong> due to missing fields"
+        f" and <strong>{_int(missing_n)} row(s) skipped</strong> due to missing input data"
         if (failed_n or missing_n) else ""
     )
     narrative = (
-        f"This report summarises the results of an E2Open import duty analysis "
-        f"for reference date <strong>{_e(ref_date)}</strong>. "
-        f"A total of <strong>{_int(ok_n)} lane(s)</strong> are included in this report"
+        f"This report covers the E2Open import duty analysis for reference date "
+        f"<strong>{_e(ref_date)}</strong>, encompassing <strong>{_int(ok_n)} trade lane(s)</strong>"
         f"{fail_txt}. "
-        f"The total customs value analysed amounts to <strong>{_eur(customs_sum)}</strong>. "
-        f"Duties actually paid total <strong>{_eur(paid_sum)}</strong>, with a potential saving of "
-        f"<strong>{_eur(savings)}</strong> by applying the most favourable program instead of the rates paid "
-        f"(effective rate on minimum duties: <strong>{_pct(eff_rate)}</strong>)."
+        f"Total customs value under review amounts to <strong>{_eur(customs_sum)}</strong>, "
+        f"with duties paid of <strong>{_eur(paid_sum)}</strong>. "
+        f"Applying the most favourable preferential programme to all lanes yields an estimated duty saving "
+        f"of <strong>{_eur(savings)}</strong> "
+        f"(minimum effective duty rate: <strong>{_pct(eff_rate)}</strong>). "
+        + (f"The initiative portfolio tracks <strong>{_int(ini_n)} initiative(s)</strong> "
+           f"with <strong>{_eur(ini_real_total)}</strong> in confirmed savings realised to date."
+           if ini_n > 0 else "")
     )
 
     # ── Inline CSS ────────────────────────────────────────────────────────────
@@ -939,6 +1089,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .footer { text-align: center; color: #aaa; font-size: 11px; padding: 22px 44px 28px; }
 
+.ini-kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+.ini-kpi { background: #faf5ff; border: 1px solid #e6dcff; border-radius: 10px; padding: 12px 14px; border-top: 3px solid #7500C0; }
+.ini-kpi .kpi-label { color: #460073; }
+.ini-kpi .kpi-value { font-size: 20px; }
+
 @media print {
   body { background: white; }
   .section { margin: 10px 0; box-shadow: none; page-break-inside: avoid; }
@@ -952,7 +1107,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
         "labels":   chart_labels,
         "customs":  chart_customs,
         "effRate":  chart_eff_rate,
-    })
+    }).replace("</", "<\\/")  # prevent </script> injection when embedded in HTML
 
     # ── Assemble HTML ─────────────────────────────────────────────────────────
     account_meta = f"<span>&#128100; Account: <strong>{_e(account_label)}</strong></span>" if account_label else ""
@@ -1052,6 +1207,39 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <h3>Customs Value &amp; Effective Duty Rate by Month</h3>
     <canvas id="trendChart" height="90"></canvas>
   </div>
+</div>
+
+<div class="section">
+  <h2>Initiative Portfolio</h2>
+  <p class="narrative">{ini_narrative}</p>
+  <br>
+  <div class="ini-kpi-grid">
+    <div class="ini-kpi">
+      <div class="kpi-label">Total Initiatives</div>
+      <div class="kpi-value">{_int(ini_n)}</div>
+      <div class="kpi-sub">Identified + Validated + Completed</div>
+    </div>
+    <div class="ini-kpi">
+      <div class="kpi-label">Overpaid Duties — PRE</div>
+      <div class="kpi-value">{_eur(ini_pre_total)}</div>
+      <div class="kpi-sub">Duty overpayment at inception</div>
+    </div>
+    <div class="ini-kpi">
+      <div class="kpi-label">Savings Realized — POST</div>
+      <div class="kpi-value good">{_eur(ini_real_total)}</div>
+      <div class="kpi-sub">FTA savings + reimbursements</div>
+    </div>
+    <div class="ini-kpi">
+      <div class="kpi-label">Realization Rate</div>
+      <div class="kpi-value {'good' if (ini_rate or 0) >= 50 else ''}">{_pct(ini_rate)}</div>
+      <div class="kpi-sub">Realized vs. identified potential</div>
+    </div>
+  </div>
+  <h3>Savings by Initiative Status</h3>
+  {ini_status_table}
+  <br>
+  <h3>Top Initiatives by Identified Potential</h3>
+  {ini_top_table}
 </div>
 
 <div class="section">
@@ -1334,19 +1522,19 @@ def parse_corrections_excel(
     try:
         df_corr = pd.read_excel(uploaded_file, sheet_name="Corrections")
     except Exception as exc:
-        return None, [f"No se pudo leer el archivo Excel: {exc}"]
+        return None, [f"Could not read Excel file: {exc}"]
 
     if "_db_id" not in df_corr.columns:
         return None, [
-            "El archivo no contiene la columna '_db_id'. "
-            "Usa únicamente archivos exportados desde Duty Cockpit."
+            "The file does not contain the '_db_id' column. "
+            "Only use files exported from Duty Cockpit."
         ]
 
     # Normalise _db_id to int
     df_corr["_db_id"] = pd.to_numeric(df_corr["_db_id"], errors="coerce")
     n_bad = int(df_corr["_db_id"].isna().sum())
     if n_bad:
-        errors.append(f"{n_bad} fila(s) con _db_id inválido ignoradas.")
+        errors.append(f"{n_bad} row(s) with invalid _db_id ignored.")
     df_corr = df_corr[df_corr["_db_id"].notna()].copy()
     df_corr["_db_id"] = df_corr["_db_id"].astype(int)
 
@@ -1358,13 +1546,13 @@ def parse_corrections_excel(
             sample = sorted(unknown)[:5]
             suffix = "..." if len(unknown) > 5 else ""
             errors.append(
-                f"{len(unknown)} _db_id(s) no existen en la DB: "
-                f"{sample}{suffix}. Serán ignoradas."
+                f"{len(unknown)} _db_id(s) not found in DB: "
+                f"{sample}{suffix}. They will be ignored."
             )
             df_corr = df_corr[df_corr["_db_id"].isin(valid_ids)]
 
     if df_corr.empty:
-        return None, errors + ["No quedan filas válidas para procesar."]
+        return None, errors + ["No valid rows remaining to process."]
 
     # Split deletes from updates
     if "_delete" in df_corr.columns:

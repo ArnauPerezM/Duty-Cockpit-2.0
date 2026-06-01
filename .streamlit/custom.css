@@ -1,0 +1,468 @@
+/* ============================================================================
+ * Duty Cockpit 2.0 — global Streamlit CSS
+ * Loaded once at startup from app.py via load_custom_css() in src/ui_shared.py.
+ * Do NOT duplicate these rules in Python st.markdown() calls.
+ * ============================================================================ */
+
+:root {
+  --accenture-purple-core:     #A100FF;
+  --accenture-purple-dark:     #7500C0;
+  --accenture-purple-darkest:  #460073;
+  --accenture-purple-light:    #C2A3FF;
+  --accenture-purple-lightest: #E6DCFF;
+}
+
+/* --- Hero header --- */
+.hero-wrap {
+  border-radius: 16px;
+  padding: 18px 18px 14px 18px;
+  background: linear-gradient(135deg, rgba(70,0,115,0.55) 0%, rgba(161,0,255,0.20) 55%, rgba(255,255,255,0.02) 100%);
+  border: 1px solid rgba(194,163,255,0.18);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.35);
+  margin-bottom: 14px;
+}
+
+.hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.hero-title {
+  font-size: 40px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  line-height: 1.05;
+}
+
+.hero-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.70);
+}
+
+div.block-container {
+  padding-top: 1rem !important;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.20);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px rgba(161,0,255,0.12);
+}
+
+.status-bar {
+  margin-top: 12px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.status-bar-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg,
+    var(--accenture-purple-darkest) 0%,
+    var(--accenture-purple-core)    55%,
+    var(--accenture-purple-light)   100%);
+  opacity: 0.95;
+}
+
+/* --- KPI cards --- */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--kpi-cols, 4), minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1100px) {
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 650px) {
+  .kpi-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+}
+
+.kpi-card {
+  border-radius: 16px;
+  padding: 14px 16px 12px 16px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 10px 26px rgba(0,0,0,0.30);
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+}
+
+.kpi-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 3px;
+  width: 100%;
+  background: linear-gradient(90deg,
+    var(--accenture-purple-darkest),
+    var(--accenture-purple-core),
+    var(--accenture-purple-light));
+  opacity: 0.95;
+}
+
+.kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.kpi-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.80);
+  margin: 0;
+  text-align: center;
+}
+
+.kpi-value {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  line-height: 1.1;
+  text-align: center;
+}
+
+.kpi-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.60);
+  text-align: center;
+}
+
+.kpi-delta {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(194,163,255,0.22);
+  background: rgba(161,0,255,0.10);
+  color: rgba(230,220,255,0.95);
+  font-size: 12px;
+}
+
+.kpi-delta.bad {
+  border: 1px solid rgba(255,120,120,0.28);
+  background: rgba(255,60,60,0.12);
+}
+
+.kpi-delta.good {
+  border: 1px solid rgba(120,255,200,0.22);
+  background: rgba(40,200,120,0.10);
+}
+
+/* ── Compact KPI cards (parameterised columns via --kpi-cols inline style) */
+.kpi-grid-compact {
+  display: grid;
+  grid-template-columns: repeat(var(--kpi-cols, 6), minmax(0, 1fr));
+  gap: 8px;
+}
+.kpi-card-compact {
+  border-radius: 10px;
+  padding: 8px 10px 6px 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.20);
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+}
+.kpi-card-compact::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(90deg,
+    var(--accenture-purple-darkest),
+    var(--accenture-purple-core),
+    var(--accenture-purple-light));
+}
+.kpi-card-compact .kpi-label { font-size: 15px; font-weight: 600; color: rgba(255,255,255,0.80); margin: 0; text-align: center; }
+.kpi-card-compact .kpi-value { font-size: 34px; font-weight: 800; line-height: 1.1; text-align: center; }
+.kpi-card-compact .kpi-sub   { font-size: 10px; color: rgba(255,255,255,0.50); margin-top: 2px; text-align: center; }
+.kpi-card-compact .kpi-delta {
+  margin-top: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(194,163,255,0.22);
+  background: rgba(161,0,255,0.10);
+  color: rgba(230,220,255,0.95);
+  font-size: 10px;
+}
+.kpi-card-compact .kpi-delta.bad {
+  border: 1px solid rgba(255,120,120,0.28);
+  background: rgba(255,60,60,0.12);
+}
+.kpi-card-compact .kpi-delta.good {
+  border: 1px solid rgba(120,255,200,0.22);
+  background: rgba(40,200,120,0.10);
+}
+
+/* ── KPI entry animation ──────────────────────────────────────── */
+@keyframes kpiIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);  }
+}
+.kpi-value {
+  animation: kpiIn 0.55s ease both;
+}
+.kpi-card, .kpi-card-compact {
+  animation: kpiIn 0.45s ease both;
+}
+
+/* ── Tab navigation (st.radio styled as horizontal tabs) ────────── */
+.st-key-duty_tab_nav {
+  margin: 0 0 14px 0;
+  border-bottom: 1px solid rgba(194,163,255,0.18);
+}
+.st-key-duty_tab_nav div[role="radiogroup"] {
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  gap: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label {
+  margin: 0 !important;
+  padding: 10px 22px 9px 22px !important;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease;
+  background: transparent !important;
+  position: relative;
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label:hover {
+  color: rgba(255,255,255,0.95) !important;
+  border-bottom-color: rgba(194,163,255,0.30);
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label > div:first-child {
+  /* Hide the radio circle */
+  display: none !important;
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label > div:nth-child(2),
+.st-key-duty_tab_nav div[role="radiogroup"] > label p {
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  color: rgba(255,255,255,0.62);
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) {
+  border-bottom-color: var(--accenture-purple-core) !important;
+}
+.st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) > div:nth-child(2),
+.st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) p {
+  color: var(--accenture-purple-core) !important;
+  font-weight: 700 !important;
+}
+
+/* ── Initiative details — section headers & date cards ─────────── */
+.ini-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: rgba(255,255,255,0.65);
+  margin: 22px 0 4px 0;
+}
+.ini-section-title .ini-section-icon { font-size: 16px; }
+.ini-section-rule {
+  height: 1px;
+  background: linear-gradient(90deg,
+    var(--accenture-purple-core) 0%,
+    rgba(161,0,255,0.30) 35%,
+    transparent 70%);
+  margin: 0 0 12px 0;
+}
+
+/* Definition list — editorial, no cards, no borders; used in initiative PRE/POST sections. */
+.ini-deflist {
+  display: grid;
+  grid-template-columns: repeat(var(--ini-cols, 5), minmax(0, 1fr));
+  gap: 0;
+  padding: 10px 0 14px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  margin: 0 0 4px 0;
+}
+.ini-deflist-item {
+  padding: 0 20px 0 0;
+}
+.ini-deflist-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.65px;
+  color: rgba(255,255,255,0.38);
+  margin-bottom: 5px;
+  line-height: 1.2;
+}
+.ini-deflist-value {
+  font-size: 17px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.92);
+  letter-spacing: 0.1px;
+  line-height: 1.2;
+}
+.ini-deflist-value.muted {
+  color: rgba(255,255,255,0.26);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 14px;
+}
+
+/* Tooltip on ini-deflist labels */
+.ini-deflist-label[data-tooltip] {
+  cursor: help;
+  position: relative;
+  display: inline-block;
+  border-bottom: 1px dotted rgba(255,255,255,0.22);
+}
+.ini-deflist-label[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 0;
+  min-width: 210px;
+  max-width: 300px;
+  background: rgba(25,8,45,0.97);
+  border: 1px solid rgba(161,0,255,0.38);
+  border-radius: 7px;
+  padding: 8px 11px;
+  font-size: 11px;
+  font-weight: 400;
+  color: rgba(255,255,255,0.82);
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: 1.5;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 1000;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+}
+.ini-deflist-label[data-tooltip]:hover::after {
+  opacity: 1;
+}
+
+.ini-date-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: rgba(255,255,255,0.60);
+  margin-bottom: 6px;
+}
+.ini-date-readonly {
+  font-size: 22px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.92);
+  padding: 4px 0;
+  letter-spacing: 0.2px;
+}
+.ini-date-readonly.muted {
+  color: rgba(255,255,255,0.35);
+  font-weight: 500;
+  font-style: italic;
+}
+
+/* Date card — pure-HTML version (no Streamlit widget inside).
+   For the editable cards we rely on st.container(border=True) which renders
+   its own bordered wrapper; CSS targets that wrapper below for accents. */
+.ini-date-card-static {
+  position: relative;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px;
+  padding: 12px 14px 10px 14px;
+  overflow: hidden;
+}
+.ini-date-card-static::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0;
+  height: 2px; width: 100%;
+  background: linear-gradient(90deg,
+    var(--accenture-purple-darkest),
+    var(--accenture-purple-core),
+    var(--accenture-purple-light));
+}
+
+/* ── Table styling ────────────────────────────────────────────── */
+[data-testid="stDataFrame"] thead tr th {
+  background-color: rgba(161,0,255,0.18) !important;
+  color: rgba(255,255,255,0.95) !important;
+  font-weight: 700 !important;
+}
+[data-testid="stDataEditorContainer"],
+[data-testid="stDataFrame"] {
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+  background: linear-gradient(
+    135deg,
+    rgba(70,0,115,0.75) 0%,
+    rgba(161,0,255,0.22) 55%,
+    rgba(10,14,24,0.95) 100%
+  ) !important;
+  border-right: 1px solid rgba(194,163,255,0.18);
+}
+[data-testid="stSidebar"] > div:first-child { padding-top: 14px; }
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: rgba(255,255,255,0.92) !important; }
+[data-testid="stSidebar"] .stButton > button {
+  border: 1px solid rgba(194,163,255,0.25);
+  box-shadow: 0 8px 18px rgba(0,0,0,0.22);
+}
+
+/* ── Layout ───────────────────────────────────────────────────── */
+.block-container {
+  max-width: 100% !important;
+  padding-left: 2.2rem !important;
+  padding-right: 2.2rem !important;
+}
+h1, h2, h3, h4, h5, h6, p, div, span { text-align: left !important; }
+.hero-wrap, .hero-top, .hero-title, .hero-sub {
+  text-align: left !important;
+  justify-content: space-between !important;
+}
+
+/* ── Form controls ────────────────────────────────────────────── */
+div[data-testid="stMultiSelect"] label p {
+  font-size: 24px !important;
+  font-weight: 600 !important;
+}

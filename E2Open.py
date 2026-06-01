@@ -1,7 +1,10 @@
 
+import logging
 import requests
 import datetime
 import time
+
+_logger = logging.getLogger(__name__)
 
 _ENDPOINTS = {
     "UAT": {
@@ -22,6 +25,13 @@ _ENDPOINTS = {
 
 
 class E2OpenSession(requests.Session):
+    # (connect timeout, read timeout) in seconds — prevents hung runs on flaky networks
+    _DEFAULT_TIMEOUT = (10, 30)
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", self._DEFAULT_TIMEOUT)
+        return super().request(method, url, **kwargs)
+
     def __init__(self, username: str, password: str, tenant: str, environment: str = "UAT"):
         requests.Session.__init__(self)
         self.username = username
@@ -46,11 +56,22 @@ class E2OpenSession(requests.Session):
             "Tenant id": self.tenant,
         }
         response = self.get(url, params=params, auth=requests.auth.HTTPBasicAuth(self.username, self.password))
-        self.token = response.json()["access_token"]
-        self.tokenExpires = datetime.datetime.now() + datetime.timedelta(seconds=response.json()["expires_in"])
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"E2Open authentication failed (HTTP {response.status_code}): {response.text[:300]}"
+            )
+        try:
+            data = response.json()
+            self.token = data["access_token"]
+            self.tokenExpires = datetime.datetime.now() + datetime.timedelta(seconds=data["expires_in"])
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"E2Open token response missing expected fields ({exc}). "
+                f"Response: {response.text[:300]}"
+            ) from exc
         self.headers = {"Authorization": f"Bearer {self.token}"}
         self.tokenCounter += 1
-        print(f"Token number: {self.tokenCounter}, valid until {self.tokenExpires}")
+        _logger.info("Token %d obtained, valid until %s", self.tokenCounter, self.tokenExpires)
 
     def _post_with_retry(self, url: str, request_body: dict):
         """POST helper with auto token refresh on 401 and connection retry."""
@@ -63,8 +84,8 @@ class E2OpenSession(requests.Session):
                     self.getToken()
                     response = self.post(url, headers=self.headers, json=request_body)
                 return response
-            except requests.exceptions.ConnectionError:
-                print(f"Connection lost. Retry ({attempt})")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                _logger.warning("Connection lost or timed out. Retry (%d)", attempt)
                 if attempt < 3:
                     time.sleep(2 ** attempt)
                     continue
