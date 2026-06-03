@@ -58,28 +58,27 @@ def render_hero_header(
     subtitle: str,
     run_state: str,
     account_label: str = "",
-) -> None:
+) -> bool:
     """
-    Visual hero header with a status chip + a gradient status bar.
+    Visual hero header with a status chip + gradient bar + Help button.
+    Returns True if the Help button was clicked this run.
     run_state: "ready" | "blocked" | "running" | "completed" | "failed" | "cancelled"
-    account_label: if set, shown as a secondary chip below the status chip.
     """
-    # Styling provided by .streamlit/custom.css (loaded once via load_custom_css()).
     state = (run_state or "ready").lower().strip()
     state_map = {
-        "ready": ("Ready", ACCENTURE_PURPLE_LIGHT, "rgba(161,0,255,0.10)"),
-        "blocked": ("Blocked", "rgba(255,165,0,0.85)", "rgba(255,165,0,0.10)"),
-        "running": ("Running", ACCENTURE_PURPLE_CORE, "rgba(161,0,255,0.15)"),
-        "completed": ("Completed", "rgba(120,255,200,0.90)", "rgba(40,200,120,0.12)"),
-        "failed": ("Failed", "rgba(255,120,120,0.90)", "rgba(255,60,60,0.12)"),
-        "cancelled": ("Cancelled", "rgba(255,120,120,0.90)", "rgba(255,60,60,0.12)"),
+        "ready":     ("Ready",     ACCENTURE_PURPLE_LIGHT,         "rgba(161,0,255,0.10)"),
+        "blocked":   ("Blocked",   "rgba(255,165,0,0.85)",         "rgba(255,165,0,0.10)"),
+        "running":   ("Running",   ACCENTURE_PURPLE_CORE,          "rgba(161,0,255,0.15)"),
+        "completed": ("Completed", "rgba(120,255,200,0.90)",       "rgba(40,200,120,0.12)"),
+        "failed":    ("Failed",    "rgba(255,120,120,0.90)",       "rgba(255,60,60,0.12)"),
+        "cancelled": ("Cancelled", "rgba(255,120,120,0.90)",       "rgba(255,60,60,0.12)"),
     }
     label, dot_color, chip_bg = state_map.get(state, state_map["ready"])
 
-    account_chip = ""
+    account_chip_html = ""
     if account_label and account_label.strip():
-        account_chip = (
-            f'<div style="margin-top:6px; display:inline-flex; align-items:center; gap:6px; '
+        account_chip_html = (
+            f'<div style="margin-top:4px; display:inline-flex; align-items:center; gap:6px; '
             f'padding:4px 10px; border-radius:999px; border:1px solid rgba(194,163,255,0.18); '
             f'background:rgba(161,0,255,0.08); font-size:11px; color:rgba(255,255,255,0.70);">'
             f'<span style="opacity:0.7;">&#128100;</span>'
@@ -87,25 +86,39 @@ def render_hero_header(
             f'</div>'
         )
 
-    html = (
-        f'<div class="hero-wrap">'
-        f'  <div class="hero-top">'
-        f'    <div>'
-        f'      <div class="hero-title">{_esc(title)}</div>'
-        f'      <div class="hero-sub">{_esc(subtitle)}</div>'
-        f'    </div>'
-        f'    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
-        f'      <div class="status-chip" style="background:{chip_bg}">'
-        f'        <span class="status-dot" style="background:{dot_color}"></span>'
-        f'        <span><b>{_esc(label)}</b></span>'
-        f'      </div>'
-        f'      {account_chip}'
-        f'    </div>'
-        f'  </div>'
-        f'  <div class="status-bar"><div class="status-bar-fill"></div></div>'
-        f'</div>'
-    )
-    st.markdown(html, unsafe_allow_html=True)
+    help_clicked = False
+    with st.container(key="hero_main"):
+        col_left, col_right = st.columns([4, 1], gap="small", vertical_alignment="top")
+
+        with col_left:
+            st.markdown(
+                f'<div style="padding-top:2px;">'
+                f'<div class="hero-title">{_esc(title)}</div>'
+                f'<div class="hero-sub">{_esc(subtitle)}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with col_right:
+            with st.container(key="hero_right_stack"):
+                st.markdown(
+                    f'<div class="hero-right">'
+                    f'<div class="status-chip" style="background:{chip_bg};">'
+                    f'<span class="status-dot" style="background:{dot_color};"></span>'
+                    f'<span><b>{_esc(label)}</b></span>'
+                    f'</div>'
+                    f'{account_chip_html}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                help_clicked = st.button("Help", key="btn_hero_help")
+
+        st.markdown(
+            '<div class="status-bar" style="margin-top:4px;"><div class="status-bar-fill"></div></div>',
+            unsafe_allow_html=True,
+        )
+
+    return help_clicked
 
 
 def _esc(s: Any) -> str:
@@ -151,7 +164,7 @@ def _apply_sidebar_filters(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]
     sf_from = st.session_state.get("sf_date_from")
     sf_to   = st.session_state.get("sf_date_to")
     if sf_from or sf_to:
-        dcol = next((c for c in ["input_date", "ref_date", "date"] if c in df.columns), None)
+        dcol = next((c for c in ["Input Date", "input_date", "ref_date", "date"] if c in df.columns), None)
         if dcol:
             dates = pd.to_datetime(df[dcol], errors="coerce")
             if sf_from:
@@ -556,24 +569,6 @@ def _render_kpi_cards(
 # -----------------------------------------------------------------------------
 # Formatting helpers (k / M / B)  ✅ (display-only)
 # -----------------------------------------------------------------------------
-def _fmt_human(x: Any, decimals: int = 0) -> str:
-    """Format numbers with k/M abbreviation for KPI display."""
-    try:
-        if x is None:
-            return "N/A"
-        v = float(x)
-    except Exception:
-        return "N/A"
-    abs_v = abs(v)
-    sign = "-" if v < 0 else ""
-    if abs_v >= 1_000_000:
-        return f"{sign}{abs_v / 1_000_000:.1f}M"
-    if abs_v >= 1_000:
-        return f"{sign}{abs_v / 1_000:.1f}k"
-    if decimals == 0:
-        return f"{sign}{int(round(abs_v))}"
-    return f"{sign}{abs_v:.{decimals}f}"
-
 
 def _fmt_num(x: Any, decimals: int = 0) -> str:
     """Format numbers with k/M abbreviation for KPI display."""
@@ -613,7 +608,7 @@ def _fmt_pct(x: Any, decimals: int = 1) -> str:
 def _strip_date_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     """Return a copy of df with time stripped from the given columns (keep YYYY-MM-DD only)."""
     df = df.copy()
-    _NA = {"nan", "None", "NaT", "nat", "none", ""}
+    _NA = {"nan", "None", "NaT", "nat", "none", "", "<NA>"}
     for c in cols:
         if c not in df.columns:
             continue

@@ -13,7 +13,7 @@ from src.ui_shared import (
     ACCENTURE_PURPLE_DARKEST,
     ACCENTURE_PURPLE_LIGHT,
     ACCENTURE_PURPLE_LIGHTEST,
-    _fmt_human,
+    _fmt_num,
     _fmt_int,
     _fmt_pct,
     _render_kpi_cards,
@@ -238,7 +238,7 @@ def _render_country_map_and_top10(metrics_df: pd.DataFrame) -> None:
 
     st.markdown("### Top 10 countries (selected metric)")
     if top_money_cols:
-        sty = top_df.style.format({c: (lambda v: _fmt_human(v)) for c in top_money_cols})
+        sty = top_df.style.format({c: (lambda v: _fmt_num(v)) for c in top_money_cols})
         st.dataframe(_stripe(sty), width="stretch", column_config=_auto_col_cfg(top_df))
     else:
         st.dataframe(_stripe(top_df), width="stretch", column_config=_auto_col_cfg(top_df))

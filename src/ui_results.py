@@ -18,6 +18,7 @@ from src.ui_shared import (
     _fmt_num,
     _pre_fmt_num,
     _render_empty_state,
+    _render_kpi_cards,
     _render_plotly,
     _stripe,
     _strip_date_cols,
@@ -80,11 +81,11 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
                 for _k in ["res_coo", "res_coi", "res_hs"]:
                     st.session_state.pop(_k, None)
                 st.rerun()
-        if _drill_coo:
+        if _drill_coo and "coo" in df.columns:
             df = df[df["coo"].isin(_drill_coo)]
-        if _drill_coi:
+        if _drill_coi and "coi" in df.columns:
             df = df[df["coi"].isin(_drill_coi)]
-        if _drill_hs:
+        if _drill_hs and "hs code" in df.columns:
             df = df[df["hs code"].isin(_drill_hs)]
     else:
         # Apply global sidebar filters
@@ -102,28 +103,14 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
     n_coo     = int(df["coo"].nunique()) if "coo" in df.columns else 0
 
     # ── 6 KPI cards ──────────────────────────────────────────────────────────
-    _kpi_cols = st.columns(6)
-    _kpis = [
-        ("# Transactions", _fmt_int(len(df)),           False),
-        ("# COI",          _fmt_int(n_coi),             False),
-        ("# COO",          _fmt_int(n_coo),             False),
-        ("Customs Value",  _fmt_num(customs_s) + " €",  False),
-        ("Duty Exposure",  _fmt_num(def_s)     + " €",  False),
-        ("Duty Paid",      _fmt_num(paid_s)    + " €",  True),
-    ]
-    for _col, (_lbl, _val, _hi) in zip(_kpi_cols, _kpis):
-        with _col:
-            _style = (
-                "background:rgba(0,178,178,0.18);border-color:rgba(0,178,178,0.40);"
-                if _hi else ""
-            )
-            st.markdown(
-                f"""<div class="kpi-card" style="{_style}">
-                  <div class="kpi-label">{_lbl}</div>
-                  <div class="kpi-value">{_val}</div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+    _render_kpi_cards(cols=6, kpis=[
+        {"label": "# Transactions", "value": _fmt_int(len(df)),          "sub": "Filtered rows"},
+        {"label": "# COI",          "value": _fmt_int(n_coi),            "sub": "Countries of import"},
+        {"label": "# COO",          "value": _fmt_int(n_coo),            "sub": "Countries of origin"},
+        {"label": "Customs Value",  "value": f"{_fmt_num(customs_s)} €", "sub": "Declared import value"},
+        {"label": "Duty Exposure",  "value": f"{_fmt_num(def_s)} €",     "sub": "Sum of default duties"},
+        {"label": "Duty Paid",      "value": f"{_fmt_num(paid_s)} €",    "sub": "Total duties paid"},
+    ])
 
     st.markdown("")
 
@@ -147,16 +134,16 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
     _ch1, _ch2, _ch3 = st.columns(3)
 
     with _ch1:
-        st.markdown("**Customs Value by COO**")
-        if "coo" in df.columns and customs_s > 0:
+        st.markdown("**Customs Value by COI**")
+        if "coi" in df.columns and customs_s > 0:
             _grp = (
-                df.groupby("coo")["customs value"]
+                df.groupby("coi")["customs value"]
                 .apply(lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
                 .reset_index()
                 .rename(columns={"customs value": "val"})
             )
             _grp = _grp[_grp["val"] > 0].nlargest(8, "val")
-            _fig = px.pie(_grp, values="val", names="coo",
+            _fig = px.pie(_grp, values="val", names="coi",
                           color_discrete_sequence=_PURPLES, template="plotly_dark")
             _fig.update_layout(height=240, **_CL, showlegend=True,
                                legend=dict(font=dict(size=12), bgcolor="rgba(0,0,0,0)"))
@@ -164,7 +151,7 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
                 textinfo="percent", textfont_size=13,
                 hovertemplate="<b>%{label}</b><br>%{value:,.0f} €<br>%{percent:.1%}<extra></extra>",
             )
-            _render_plotly(_fig, label="Customs Value by COO")
+            _render_plotly(_fig, label="Customs Value by COI")
         else:
             st.info("No customs value data.")
 
@@ -184,11 +171,11 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
                 "bgcolor": "rgba(255,255,255,0.07)",
                 "borderwidth": 0,
                 "steps": [{"range": [0, _gauge_max], "color": "rgba(255,255,255,0.07)"}],
-                "threshold": {
-                    "line": {"color": ACCENTURE_PURPLE_LIGHT, "width": 2},
+                **({"threshold": {
+                    "line": {"color": "#FFD700", "width": 3},
                     "thickness": 0.75,
-                    "value": def_s,
-                },
+                    "value": min_s,
+                }} if min_s > 0 else {}),
             },
             number={"suffix": " €", "valueformat": ",.0f",
                     "font": {"size": 26, "color": "white"}},
@@ -198,7 +185,7 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
             font={"color": "white"}, margin=dict(l=20, r=20, t=20, b=10),
         )
         _render_plotly(_fig, label="Duty Exposure gauge")
-        st.caption(f"Paid: {_fmt_num(paid_s)} € / Exposure: {_fmt_num(def_s)} €")
+        st.caption(f"Paid: {_fmt_num(paid_s)} € / Min: {_fmt_num(min_s)} € / Exposure: {_fmt_num(def_s)} €")
 
     with _ch3:
         st.markdown("**Duties Paid by COI**")

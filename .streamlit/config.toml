@@ -13,4 +13,4 @@ fileWatcherType = "none"
 gatherUsageStats = false
 
 [client]
-toolbarMode = "minimal"
+toolbarMode = "auto"

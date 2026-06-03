@@ -563,7 +563,9 @@ def _compute_min_duties(df_raw: pd.DataFrame) -> Optional[pd.DataFrame]:
 
     df = df.rename(columns={"hsNum": "hs alternative", "hs": "hs code"})
 
-    df_duty = df[df.get("calcName", "") == "DUTY"].copy()
+    if "calcName" not in df.columns:
+        return None
+    df_duty = df[df["calcName"] == "DUTY"].copy()
     if df_duty.empty:
         return None
 
@@ -738,17 +740,16 @@ def build_report_html(
     # ── KPIs ─────────────────────────────────────────────────────────────────
     df = df_merged.copy() if df_merged is not None and not df_merged.empty else pd.DataFrame()
 
-    customs_val = pd.to_numeric(df.get("customs value",  pd.Series(dtype=float)), errors="coerce").fillna(0)
-    min_duties  = pd.to_numeric(df.get("Minimum Duties", pd.Series(dtype=float)), errors="coerce").fillna(0)
-    def_duties  = pd.to_numeric(df.get("Default Duties", pd.Series(dtype=float)), errors="coerce").fillna(0)
-    duty_paid   = pd.to_numeric(df.get("duty paid",      pd.Series(dtype=float)), errors="coerce").fillna(0)
+    customs_val = pd.to_numeric(df["customs value"]  if "customs value"  in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
+    min_duties  = pd.to_numeric(df["Minimum Duties"] if "Minimum Duties" in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
+    def_duties  = pd.to_numeric(df["Default Duties"] if "Default Duties" in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
+    duty_paid   = pd.to_numeric(df["duty paid"]      if "duty paid"      in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
 
-    customs_sum = float(customs_val.sum())
-    min_sum     = float(min_duties.sum())
-    def_sum     = float(def_duties.sum())
-    paid_sum    = float(duty_paid.sum())
-    savings     = paid_sum - min_sum
-    eff_rate    = (min_sum / customs_sum * 100) if customs_sum > 0 else None
+    customs_sum  = float(customs_val.sum())
+    min_sum      = float(min_duties.sum())
+    def_sum      = float(def_duties.sum())
+    paid_sum     = float(duty_paid.sum())
+    overpaid_sum = float((duty_paid - min_duties).clip(lower=0).sum())
 
     # Lane count always from the data (report may cover multiple runs)
     ok_n      = len(df)
@@ -777,32 +778,32 @@ def build_report_html(
         return _html.escape(str(s) if s is not None else "")
 
     # ── Top findings ──────────────────────────────────────────────────────────
-    top_coi_savings = pd.DataFrame()
-    top_coi_value   = pd.DataFrame()
-    top_hs          = pd.DataFrame()
+    top_coi_overpaid = pd.DataFrame()
+    top_coi_paid     = pd.DataFrame()
+    top_hs           = pd.DataFrame()
 
     if not df.empty:
         if {"coi", "duty paid", "Minimum Duties"}.issubset(df.columns):
             tmp = df.copy()
-            tmp["_sav"] = (
+            tmp["_op"] = (
                 pd.to_numeric(tmp["duty paid"],      errors="coerce").fillna(0)
                 - pd.to_numeric(tmp["Minimum Duties"], errors="coerce").fillna(0)
-            )
-            top_coi_savings = (
-                tmp.groupby("coi")["_sav"].sum()
+            ).clip(lower=0)
+            top_coi_overpaid = (
+                tmp.groupby("coi")["_op"].sum()
                 .sort_values(ascending=False).head(5)
                 .reset_index()
-                .rename(columns={"coi": "COI", "_sav": "Potential Savings (EUR)"})
+                .rename(columns={"coi": "COI", "_op": "Overpaid Duties (EUR)"})
             )
 
-        if {"coi", "customs value"}.issubset(df.columns):
+        if {"coi", "duty paid"}.issubset(df.columns):
             tmp = df.copy()
-            tmp["customs value"] = pd.to_numeric(tmp["customs value"], errors="coerce").fillna(0)
-            top_coi_value = (
-                tmp.groupby("coi")["customs value"].sum()
+            tmp["duty paid"] = pd.to_numeric(tmp["duty paid"], errors="coerce").fillna(0)
+            top_coi_paid = (
+                tmp.groupby("coi")["duty paid"].sum()
                 .sort_values(ascending=False).head(5)
                 .reset_index()
-                .rename(columns={"coi": "COI", "customs value": "Customs Value (EUR)"})
+                .rename(columns={"coi": "COI", "duty paid": "Duty Paid (EUR)"})
             )
 
         if {"hs code", "customs value"}.issubset(df.columns):
@@ -816,34 +817,32 @@ def build_report_html(
             )
 
     # ── Monthly trend data (for chart) ───────────────────────────────────────
-    chart_labels:   List[str]   = []
-    chart_customs:  List[float] = []
-    chart_eff_rate: List[float] = []
+    chart_labels:    List[str]   = []
+    chart_duty_paid: List[float] = []
+    chart_min_duties: List[float] = []
+    chart_overpaid:  List[float] = []
 
     if not df.empty:
-        _date_col = "date" if "date" in df.columns else None
-        if _date_col and {"customs value", "Minimum Duties"}.issubset(df.columns):
+        _date_col = next((c for c in ["Input Date", "input_date", "date", "ref_date"] if c in df.columns), None)
+        if _date_col and "duty paid" in df.columns:
             _tmp = df.copy()
             _tmp["_dt"] = pd.to_datetime(_tmp[_date_col], errors="coerce")
             _tmp = _tmp.dropna(subset=["_dt"])
             if not _tmp.empty:
-                _tmp["_month"] = _tmp["_dt"].dt.to_period("M")
+                _tmp["_month"]   = _tmp["_dt"].dt.to_period("M")
+                _tmp["_dp"]      = pd.to_numeric(_tmp["duty paid"],      errors="coerce").fillna(0)
+                _tmp["_md"]      = pd.to_numeric(_tmp.get("Minimum Duties", pd.Series([0.0]*len(_tmp), index=_tmp.index)), errors="coerce").fillna(0) if "Minimum Duties" in _tmp.columns else 0.0
+                _tmp["_op"]      = (_tmp["_dp"] - _tmp["_md"]).clip(lower=0)
                 _monthly = (
                     _tmp.groupby("_month")
-                    .agg(
-                        _cv=("customs value",  lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()),
-                        _md=("Minimum Duties", lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()),
-                    )
+                    .agg(_dp=("_dp", "sum"), _md=("_md", "sum"), _op=("_op", "sum"))
                     .reset_index()
                     .sort_values("_month")
                 )
-                _monthly["_er"] = _monthly.apply(
-                    lambda r: round(r["_md"] / r["_cv"] * 100, 3) if r["_cv"] > 0 else 0.0,
-                    axis=1,
-                )
-                chart_labels   = [str(p) for p in _monthly["_month"]]
-                chart_customs  = _monthly["_cv"].round(2).tolist()
-                chart_eff_rate = _monthly["_er"].tolist()
+                chart_labels     = [str(p) for p in _monthly["_month"]]
+                chart_duty_paid  = _monthly["_dp"].round(2).tolist()
+                chart_min_duties = _monthly["_md"].round(2).tolist()
+                chart_overpaid   = _monthly["_op"].round(2).tolist()
 
     # ── Table helpers ─────────────────────────────────────────────────────────
     def _table(df_t, money_cols=None):
@@ -906,20 +905,21 @@ def build_report_html(
         _sr = _ini["savings_realized"] if "savings_realized" in _ini.columns else pd.Series([0.0]*len(_ini), index=_ini.index)
         _rb = _ini["reimbursements"] if "reimbursements" in _ini.columns else pd.Series([0.0]*len(_ini), index=_ini.index)
         _ini["_realized"] = _sr.fillna(0.0) + _rb.fillna(0.0)
+        _ini_status = _ini["status"] if "status" in _ini.columns else pd.Series([""] * len(_ini), index=_ini.index)
         ini_n           = len(_ini)
-        ini_identified  = int((_ini.get("status", pd.Series()) == "Identified").sum())
-        ini_validated   = int((_ini.get("status", pd.Series()) == "Validated").sum())
-        ini_completed   = int((_ini.get("status", pd.Series()) == "Completed").sum())
-        ini_discarded   = int((_ini.get("status", pd.Series()) == "Discarded").sum())
+        ini_identified  = int((_ini_status == "Identified").sum())
+        ini_validated   = int((_ini_status == "Validated").sum())
+        ini_completed   = int((_ini_status == "Completed").sum())
+        ini_discarded   = int((_ini_status == "Discarded").sum())
         ini_pre_total   = float(_ini["_pre_op"].sum())
         ini_real_total  = float(_ini["_realized"].sum())
         ini_reimb_total = float(_rb.fillna(0.0).sum())
-        ini_rate        = (ini_real_total / ini_pre_total * 100) if ini_pre_total > 0 else None
+        ini_capture     = (ini_real_total / ini_pre_total * 100) if ini_pre_total > 0 else None
 
         # Status breakdown table
         _st_rows = ""
         for _st in ["Identified", "Validated", "Completed", "Discarded"]:
-            _sm = _ini[_ini.get("status", pd.Series()) == _st] if "status" in _ini.columns else pd.DataFrame()
+            _sm = _ini[_ini_status == _st] if "status" in _ini.columns else pd.DataFrame()
             if _sm.empty:
                 continue
             _n  = len(_sm)
@@ -970,24 +970,25 @@ def build_report_html(
         )
 
         ini_narrative = (
-            f"The initiative portfolio comprises <strong>{_int(ini_n)} active initiative(s)</strong> "
-            f"across {_int(ini_identified)} Identified, {_int(ini_validated)} Validated, "
+            f"The initiative portfolio comprises <strong>{_int(ini_n)} initiative(s)</strong>: "
+            f"{_int(ini_identified)} Identified, {_int(ini_validated)} Validated, "
             f"{_int(ini_completed)} Completed and {_int(ini_discarded)} Discarded. "
-            f"The aggregate duty overpayment identified at inception (PRE) amounts to "
-            f"<strong>{_eur(ini_pre_total)}</strong>, of which <strong>{_eur(ini_real_total)}</strong> "
-            f"has been realised to date"
-            + (f" — a realization rate of <strong>{_pct(ini_rate)}</strong>" if ini_rate is not None else "")
+            f"Total overpaid duties identified across all initiatives amount to "
+            f"<strong>{_eur(ini_pre_total)}</strong>. Savings realized to date total "
+            f"<strong>{_eur(ini_real_total)}</strong>"
+            + (f", representing a <strong>Savings Capture Rate of {_pct(ini_capture)}</strong>" if ini_capture is not None else "")
             + f". Reimbursements collected total <strong>{_eur(ini_reimb_total)}</strong>."
         )
     else:
         ini_n = ini_identified = ini_validated = ini_completed = ini_discarded = 0
         ini_pre_total = ini_real_total = ini_reimb_total = 0.0
-        ini_rate = None
+        ini_capture = None
         ini_status_table = "<p class='no-data'>No initiative data available for this report.</p>"
         ini_top_table    = "<p class='no-data'>No initiatives to display.</p>"
         ini_narrative    = "No initiative data is available for this reporting period."
 
     # ── Narrative paragraph ───────────────────────────────────────────────────
+    capture_rate = (ini_real_total / overpaid_sum * 100) if overpaid_sum > 0 else None
     fail_txt = (
         f", with <strong>{_int(failed_n)} failure(s)</strong>"
         f" and <strong>{_int(missing_n)} row(s) skipped</strong> due to missing input data"
@@ -999,11 +1000,11 @@ def build_report_html(
         f"{fail_txt}. "
         f"Total customs value under review amounts to <strong>{_eur(customs_sum)}</strong>, "
         f"with duties paid of <strong>{_eur(paid_sum)}</strong>. "
-        f"Applying the most favourable preferential programme to all lanes yields an estimated duty saving "
-        f"of <strong>{_eur(savings)}</strong> "
-        f"(minimum effective duty rate: <strong>{_pct(eff_rate)}</strong>). "
+        f"Overpaid duties (Duty Paid − Minimum Duties) total <strong>{_eur(overpaid_sum)}</strong>. "
         + (f"The initiative portfolio tracks <strong>{_int(ini_n)} initiative(s)</strong> "
-           f"with <strong>{_eur(ini_real_total)}</strong> in confirmed savings realised to date."
+           f"with <strong>{_eur(ini_real_total)}</strong> in confirmed savings realised"
+           + (f" (Savings Capture Rate: <strong>{_pct(capture_rate)}</strong>)" if capture_rate is not None else "")
+           + "."
            if ini_n > 0 else "")
     )
 
@@ -1104,9 +1105,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     # ── Serialise chart data ──────────────────────────────────────────────────
     import json as _json
     _chart_json = _json.dumps({
-        "labels":   chart_labels,
-        "customs":  chart_customs,
-        "effRate":  chart_eff_rate,
+        "labels":     chart_labels,
+        "dutyPaid":   chart_duty_paid,
+        "minDuties":  chart_min_duties,
+        "overpaid":   chart_overpaid,
     }).replace("</", "<\\/")  # prevent </script> injection when embedded in HTML
 
     # ── Assemble HTML ─────────────────────────────────────────────────────────
@@ -1155,24 +1157,24 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
       <div class="kpi-sub">EUR equivalent</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Default Duties</div>
-      <div class="kpi-value">{_eur(def_sum)}</div>
-      <div class="kpi-sub">MFN / Default program</div>
-    </div>
-    <div class="kpi-card">
       <div class="kpi-label">Minimum Duties</div>
       <div class="kpi-value">{_eur(min_sum)}</div>
       <div class="kpi-sub">Best available program</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Potential Savings</div>
-      <div class="kpi-value good">{_eur(savings)}</div>
-      <div class="kpi-sub">Duties Paid &minus; Minimum duties</div>
+      <div class="kpi-label">Overpaid Duties</div>
+      <div class="kpi-value {'bad' if overpaid_sum > 0 else 'good'}">{_eur(overpaid_sum)}</div>
+      <div class="kpi-sub">Duty Paid &minus; Minimum Duties</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Effective Duty Rate</div>
-      <div class="kpi-value">{_pct(eff_rate)}</div>
-      <div class="kpi-sub">Minimum &divide; Customs value</div>
+      <div class="kpi-label">Savings Realized</div>
+      <div class="kpi-value good">{_eur(ini_real_total)}</div>
+      <div class="kpi-sub">FTA savings + reimbursements</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Savings Capture Rate</div>
+      <div class="kpi-value {'good' if (capture_rate or 0) >= 50 else ''}">{_pct(capture_rate)}</div>
+      <div class="kpi-sub">Savings Realized &divide; Overpaid Duties</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Failed</div>
@@ -1191,20 +1193,20 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   <h2>Key Findings</h2>
   <div class="three-col">
     <div>
-      <h3>Top 5 COI by potential savings</h3>
-      {_table(top_coi_savings, money_cols=["Potential Savings (EUR)"])}
+      <h3>Top 5 COI — Overpaid Duties</h3>
+      {_table(top_coi_overpaid, money_cols=["Overpaid Duties (EUR)"])}
     </div>
     <div>
-      <h3>Top 5 COI by customs value</h3>
-      {_table(top_coi_value, money_cols=["Customs Value (EUR)"])}
+      <h3>Top 5 COI — Duties Paid</h3>
+      {_table(top_coi_paid, money_cols=["Duty Paid (EUR)"])}
     </div>
     <div>
-      <h3>Top 5 HS codes by customs value</h3>
+      <h3>Top 5 HS Codes — Customs Value</h3>
       {_table(top_hs, money_cols=["Customs Value (EUR)"])}
     </div>
   </div>
   <div class="chart-wrap">
-    <h3>Customs Value &amp; Effective Duty Rate by Month</h3>
+    <h3>Monthly Duty Paid vs Minimum Duties (amber area = Overpaid)</h3>
     <canvas id="trendChart" height="90"></canvas>
   </div>
 </div>
@@ -1217,22 +1219,22 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <div class="ini-kpi">
       <div class="kpi-label">Total Initiatives</div>
       <div class="kpi-value">{_int(ini_n)}</div>
-      <div class="kpi-sub">Identified + Validated + Completed</div>
+      <div class="kpi-sub">{_int(ini_identified)} Identified · {_int(ini_validated)} Validated · {_int(ini_completed)} Completed</div>
     </div>
     <div class="ini-kpi">
-      <div class="kpi-label">Overpaid Duties — PRE</div>
+      <div class="kpi-label">Overpaid Duties</div>
       <div class="kpi-value">{_eur(ini_pre_total)}</div>
-      <div class="kpi-sub">Duty overpayment at inception</div>
+      <div class="kpi-sub">Identified savings opportunity</div>
     </div>
     <div class="ini-kpi">
-      <div class="kpi-label">Savings Realized — POST</div>
+      <div class="kpi-label">Savings Realized</div>
       <div class="kpi-value good">{_eur(ini_real_total)}</div>
       <div class="kpi-sub">FTA savings + reimbursements</div>
     </div>
     <div class="ini-kpi">
-      <div class="kpi-label">Realization Rate</div>
-      <div class="kpi-value {'good' if (ini_rate or 0) >= 50 else ''}">{_pct(ini_rate)}</div>
-      <div class="kpi-sub">Realized vs. identified potential</div>
+      <div class="kpi-label">Savings Capture Rate</div>
+      <div class="kpi-value {'good' if (ini_capture or 0) >= 50 else ''}">{_pct(ini_capture)}</div>
+      <div class="kpi-sub">Realized &divide; Overpaid Duties</div>
     </div>
   </div>
   <h3>Savings by Initiative Status</h3>
@@ -1268,69 +1270,36 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     return '\u20ac' + v.toFixed(0);
   }}
 
-  // Inline plugin: draws white-box black-text labels on the Effective Duty Rate line
-  const effRateLabelPlugin = {{
-    id: 'effRateLabels',
-    afterDatasetsDraw(chart) {{
-      const meta = chart.getDatasetMeta(1);
-      if (!meta || meta.hidden) return;
-      const ctx = chart.ctx;
-      const values = chart.data.datasets[1].data;
-      ctx.save();
-      ctx.font = 'bold 9px Segoe UI, Arial, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      meta.data.forEach(function(pt, i) {{
-        const val = values[i];
-        if (val == null) return;
-        const text = val.toFixed(1) + '%';
-        const tw = ctx.measureText(text).width;
-        const px = 4, py = 3;
-        const bw = tw + px * 2, bh = 14 + py * 2;
-        const cx = pt.x, cy = pt.y - bh / 2 - 8;
-        ctx.fillStyle = 'white';
-        ctx.fillRect(cx - bw / 2, cy - bh / 2, bw, bh);
-        ctx.strokeStyle = 'rgba(117,0,192,0.25)';
-        ctx.lineWidth = 0.8;
-        ctx.strokeRect(cx - bw / 2, cy - bh / 2, bw, bh);
-        ctx.fillStyle = '#000';
-        ctx.fillText(text, cx, cy);
-      }});
-      ctx.restore();
-    }}
-  }};
-  Chart.register(effRateLabelPlugin);
-
   new Chart(document.getElementById('trendChart'), {{
+    type: 'line',
     data: {{
       labels: d.labels,
       datasets: [
         {{
-          type: 'bar',
-          label: 'Customs Value (EUR)',
-          data: d.customs,
-          backgroundColor: 'rgba(70,0,115,0.82)',
-          hoverBackgroundColor: '#7500C0',
-          borderColor: 'rgba(70,0,115,0.95)',
-          borderWidth: 1,
-          borderRadius: 4,
-          yAxisID: 'yLeft',
+          label: 'Minimum Duties',
+          data: d.minDuties,
+          borderColor: '#7500C0',
+          borderWidth: 2,
+          borderDash: [5, 4],
+          backgroundColor: 'rgba(117,0,192,0.15)',
+          pointRadius: 3,
+          pointBackgroundColor: '#7500C0',
+          fill: 'origin',
+          tension: 0.3,
           order: 2,
         }},
         {{
-          type: 'line',
-          label: 'Effective Duty Rate (%)',
-          data: d.effRate,
+          label: 'Duty Paid',
+          data: d.dutyPaid,
           borderColor: '#A100FF',
-          backgroundColor: 'rgba(161,0,255,0.10)',
+          borderWidth: 2.5,
+          backgroundColor: 'rgba(161,0,255,0.28)',
+          pointRadius: 4,
           pointBackgroundColor: '#A100FF',
           pointBorderColor: '#fff',
-          pointBorderWidth: 2,
-          pointRadius: 4,
-          pointHoverRadius: 6,
-          tension: 0.35,
-          fill: false,
-          yAxisID: 'yRight',
+          pointBorderWidth: 1.5,
+          fill: '-1',
+          tension: 0.3,
           order: 1,
         }}
       ]
@@ -1339,44 +1308,27 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
       responsive: true,
       interaction: {{ mode: 'index', intersect: false }},
       plugins: {{
-        legend: {{
-          labels: {{ color: '#333', font: {{ size: 12 }} }}
-        }},
+        legend: {{ labels: {{ color: '#333', font: {{ size: 12 }} }} }},
         tooltip: {{
           callbacks: {{
-            label: function(ctx) {{
-              if (ctx.datasetIndex === 0) return ' ' + fmtEur(ctx.parsed.y);
-              return ' ' + ctx.parsed.y.toFixed(2) + '%';
+            label: function(ctx) {{ return ' ' + ctx.dataset.label + ': ' + fmtEur(ctx.parsed.y); }},
+            afterBody: function(items) {{
+              var dp = items.find(function(i) {{ return i.datasetIndex === 1; }});
+              var md = items.find(function(i) {{ return i.datasetIndex === 0; }});
+              if (dp && md) {{
+                var op = Math.max(0, dp.parsed.y - md.parsed.y);
+                return ['', 'Overpaid: ' + fmtEur(op)];
+              }}
+              return [];
             }}
           }}
         }}
       }},
       scales: {{
-        x: {{
-          ticks: {{ color: '#555', font: {{ size: 11 }} }},
-          grid:  {{ color: 'rgba(0,0,0,0.06)' }}
-        }},
-        yLeft: {{
-          type: 'linear',
-          position: 'left',
-          ticks: {{
-            color: '#333',
-            font: {{ size: 11 }},
-            callback: fmtEur
-          }},
-          grid: {{ color: 'rgba(0,0,0,0.07)' }}
-        }},
-        yRight: {{
-          type: 'linear',
-          position: 'right',
-          min: 0,
-          ticks: {{
-            stepSize: 0.5,
-            color: '#7500C0',
-            font: {{ size: 11 }},
-            callback: function(v) {{ return v.toFixed(1) + '%'; }}
-          }},
-          grid: {{ drawOnChartArea: false }}
+        x: {{ ticks: {{ color: '#555', font: {{ size: 11 }} }}, grid: {{ color: 'rgba(0,0,0,0.06)' }} }},
+        y: {{
+          ticks: {{ color: '#333', font: {{ size: 11 }}, callback: fmtEur }},
+          grid:  {{ color: 'rgba(0,0,0,0.07)' }}
         }}
       }}
     }}

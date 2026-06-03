@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.ui_shared import (
@@ -71,7 +72,7 @@ def _compute_initiative_metrics(df_ini: pd.DataFrame, df_tx_raw: pd.DataFrame) -
         _base_names.append("_mr")
     if _has_mdp:
         _base_names.append("_mp")
-    _tx.columns = _base_names
+    _tx = _tx.rename(columns=dict(zip(_cols_to_load, _base_names)))
     if not _has_mdr:
         _tx["_mr"] = float("nan")
     if not _has_mdp:
@@ -120,7 +121,7 @@ def _compute_initiative_metrics(df_ini: pd.DataFrame, df_tx_raw: pd.DataFrame) -
 
     if _has_mdr:
         _has_mdr_ini = _paired["_imr"] != 0
-        _paired = _paired[~_has_mdr_ini | (_paired["_mr"] == _paired["_imr"])].copy()
+        _paired = _paired[~_has_mdr_ini | ((_paired["_mr"] - _paired["_imr"]).abs() < 1e-6)].copy()
 
     _paired["_end_dt"] = _paired["_impl_dt"] + pd.Timedelta(days=365)
     _paired["_is_post"] = (
@@ -236,13 +237,17 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
     df["_initial_overpaid"] = (_dp - _md).round(2)
 
     def _end_date(row):
-        if str(row.get("status", "")) in ("Completed", "Closed"):
-            impl = _safe_str(row.get("implementation_date"))
-            if impl:
-                try:
-                    return (pd.to_datetime(impl) + pd.Timedelta(days=365)).strftime("%Y-%m-%d")
-                except Exception:
-                    pass
+        # Use manually set end_date if available
+        manual = _safe_str(row.get("end_date", ""))
+        if manual and manual not in ("nan", "None", "NaT", ""):
+            return manual[:10]
+        # Otherwise auto-compute from implementation_date + 365 days
+        impl = _safe_str(row.get("implementation_date"))
+        if impl:
+            try:
+                return (pd.to_datetime(impl) + pd.Timedelta(days=365)).strftime("%Y-%m-%d")
+            except Exception:
+                pass
         return ""
 
     df["_end_date"]         = df.apply(_end_date, axis=1)
@@ -289,12 +294,12 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
     total_realized     = fta_realized + reimbursed
 
     _render_kpi_cards([
-        {"label": "Est. Annual Savings",        "value": _fmt_num(ann_savings)        + " €", "icon": "📅", "sub": "Auto-computed from transaction data"},
-        {"label": "Potential Reimbursements",  "value": _fmt_num(pot_reimbursements) + " €", "icon": "🔄", "sub": "Sum of potential reimbursements"},
-        {"label": "Total Potential Savings",   "value": _fmt_num(pot_savings)        + " €", "icon": "💡", "sub": "Annual Savings + Potential Reimbursements"},
-        {"label": "FTA Savings Realized",      "value": _fmt_num(fta_realized)       + " €", "icon": "✅", "sub": "Sum of savings realized"},
-        {"label": "Reimbursements Realized",   "value": _fmt_num(reimbursed)         + " €", "icon": "💰", "sub": "Sum of reimbursements realized"},
-        {"label": "Total Savings Realized",    "value": _fmt_num(total_realized)     + " €", "icon": "🏆", "sub": "FTA Realized + Reimbursements Realized"},
+        {"label": "Est. Annual Savings",        "value": f"{_fmt_num(ann_savings)} €", "icon": "📅", "sub": "Auto-computed from transaction data"},
+        {"label": "Potential Reimbursements",  "value": f"{_fmt_num(pot_reimbursements)} €", "icon": "🔄", "sub": "Sum of potential reimbursements"},
+        {"label": "Total Potential Savings",   "value": f"{_fmt_num(pot_savings)} €", "icon": "💡", "sub": "Annual Savings + Potential Reimbursements"},
+        {"label": "FTA Savings Realized",      "value": f"{_fmt_num(fta_realized)} €", "icon": "✅", "sub": "Sum of savings realized"},
+        {"label": "Reimbursements Realized",   "value": f"{_fmt_num(reimbursed)} €", "icon": "💰", "sub": "Sum of reimbursements realized"},
+        {"label": "Total Savings Realized",    "value": f"{_fmt_num(total_realized)} €", "icon": "🏆", "sub": "FTA Realized + Reimbursements Realized"},
     ], compact=True)
 
     st.markdown("")
@@ -312,67 +317,84 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
 
     cch1, cch2 = st.columns(2)
 
-    # 1 — #Initiatives by Status (horizontal stacked by COI)
+    # 1 — Initiative Portfolio by Status (donut)
     with cch1:
-        st.markdown("**#Initiatives by Status**")
+        st.markdown("**Initiative Portfolio by Status**")
         if "status" in df.columns:
-            if "coi" in df.columns:
-                grp = df.groupby(["status", "coi"]).size().reset_index(name="count")
-            else:
-                grp = df.groupby("status").size().reset_index(name="count")
-                grp["coi"] = "All"
+            _st_cnt = df.groupby("status").size().reset_index(name="count")
+            _total_ini = int(_st_cnt["count"].sum())
+            if not _st_cnt.empty:
+                _color_map = {
+                    "Identified": ACCENTURE_PURPLE_LIGHTEST,
+                    "Validated":  ACCENTURE_PURPLE_LIGHT,
+                    "Completed":  ACCENTURE_PURPLE_CORE,
+                    "Discarded":  ACCENTURE_PURPLE_DARKEST,
+                }
+                _st_cnt["color"] = _st_cnt["status"].map(_color_map).fillna(ACCENTURE_PURPLE_DARK)
+                fig = go.Figure(go.Pie(
+                    labels=_st_cnt["status"],
+                    values=_st_cnt["count"],
+                    hole=0.62,
+                    marker=dict(
+                        colors=_st_cnt["color"].tolist(),
+                        line=dict(color="rgba(0,0,0,0.3)", width=2),
+                    ),
+                    textinfo="label+percent",
+                    textfont=dict(size=12),
+                    hovertemplate="<b>%{label}</b><br>%{value} initiatives (%{percent})<extra></extra>",
+                ))
+                _CL_donut = {k: v for k, v in _CL.items() if k != "showlegend"}
+                fig.update_layout(
+                    height=280,
+                    annotations=[dict(
+                        text=f"<b>{_total_ini}</b><br><span style='font-size:10px'>initiatives</span>",
+                        x=0.5, y=0.5, showarrow=False,
+                        font=dict(size=18, color="rgba(255,255,255,0.92)"),
+                        xanchor="center",
+                    )],
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.20,
+                                xanchor="center", x=0.5, font=dict(size=11),
+                                bgcolor="rgba(0,0,0,0)"),
+                    **_CL_donut,
+                )
+                _render_plotly(fig, label="Initiative Portfolio by Status")
 
-            status_order = [s for s in _INITIATIVE_STATUS_OPTIONS if s in grp["status"].unique()]
-            fig = px.bar(
-                grp, x="count", y="status", color="coi", orientation="h",
-                template="plotly_dark",
-                color_discrete_sequence=[
-                    ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT,
-                    ACCENTURE_PURPLE_DARK, ACCENTURE_PURPLE_LIGHTEST,
-                    ACCENTURE_PURPLE_DARKEST,
-                ],
-                category_orders={"status": status_order},
-                labels={"count": "# Initiatives", "status": "Status", "coi": "COI"},
-            )
-            fig.update_layout(height=280, **_CL)
-            fig.update_xaxes(**_AXIS); fig.update_yaxes(**_AXIS)
-            fig.update_traces(hovertemplate="<b>%{y}</b><br>%{fullData.name}: %{x:,d}<extra></extra>")
-            _render_plotly(fig, label="#Initiatives by Status")
-
-    # 2 — Total Savings Realized by COI (stacked: FTA + Reimbursements)
+    # 2 — Top 10 Open Initiatives by country (Identified or Validated), sorted by count
     with cch2:
-        st.markdown("**Total Savings Realized by COI**")
-        if "coi" in df.columns:
-            fta = df.groupby("coi")["savings_realized"].sum().reset_index().rename(columns={"savings_realized": "value"})
-            fta["type"] = "FTA Savings"
-            rei = df.groupby("coi")["reimbursements"].sum().reset_index().rename(columns={"reimbursements": "value"})
-            rei["type"] = "Reimbursements"
-            stacked = pd.concat([fta, rei], ignore_index=True)
-            stacked = stacked[stacked["value"] > 0]
-            if not stacked.empty:
-                coi_order = (
-                    stacked.groupby("coi")["value"].sum()
-                    .sort_values(ascending=False).index.tolist()
+        st.markdown("**Top 10 Open Initiatives by Country of Import**")
+        if "status" in df.columns and "coi" in df.columns:
+            _open = df[df["status"].isin(["Identified", "Validated"])].copy()
+            if not _open.empty:
+                _by_coi = (
+                    _open.groupby("coi")
+                    .agg(initiatives=("id", "count"))
+                    .reset_index()
+                    .sort_values("initiatives", ascending=True)
+                    .tail(10)
                 )
                 fig = px.bar(
-                    stacked, x="coi", y="value", color="type",
+                    _by_coi, x="initiatives", y="coi", orientation="h",
                     template="plotly_dark",
-                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT],
-                    category_orders={"coi": coi_order},
-                    labels={"value": "Savings Realized (€)", "coi": "COI", "type": ""},
+                    color_discrete_sequence=[ACCENTURE_PURPLE_LIGHT],
+                    labels={"initiatives": "# Open Initiatives", "coi": "Country"},
+                    text="initiatives",
                 )
                 fig.update_layout(
-                    height=280, yaxis_ticksuffix=" €",
-                    showlegend=True,
-                    legend=dict(font=dict(size=12), bgcolor="rgba(0,0,0,0)"),
-                    **{k: v for k, v in _CL.items() if k != "showlegend"},
+                    height=280,
+                    xaxis=dict(tickformat="d"),
+                    **_CL,
                 )
                 fig.update_xaxes(**_AXIS)
-                fig.update_yaxes(**_AXIS, tickformat=".2s")
-                fig.update_traces(hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{y:,.0f} €<extra></extra>")
-                _render_plotly(fig, label="Total Savings Realized by COI")
+                fig.update_yaxes(**_AXIS)
+                fig.update_traces(
+                    texttemplate="%{text}",
+                    textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>%{x} open initiatives<extra></extra>",
+                )
+                _render_plotly(fig, label="Top 10 Open Initiatives by Country")
             else:
-                st.info("No savings realized data yet.")
+                st.info("No open initiatives (Identified or Validated).")
 
     # ── Initiatives editor ────────────────────────────────────────────────────
     st.markdown("### Initiatives table")
@@ -455,9 +477,9 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
         df_main = df.copy()
 
     display_cols_base = [
-        "id", "coo", "coi", "hs_code", "material_number", "min_duty_program", "program_description",
+        "id", "coo", "coi", "hs_code", "material_number", "min_duty_program",
         "status", "comments",
-        "customs_value", "duty_paid", "_applied_rate_disp", "_initial_overpaid",
+        "_initial_overpaid",
         "potential_reimbursements", "reimbursements", "_total_savings_realized",
     ]
     extra_cols = ["_group"] if has_groups else []
@@ -493,9 +515,8 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
         if ro in disp.columns:
             col_cfg[ro] = st.column_config.TextColumn(_FRIENDLY.get(ro, ro), disabled=True)
     # Pre-format read-only numeric columns as display strings (thousands separator + €/%)
-    _ini_rate_cols = {"_applied_rate_disp", "_asis_rate", "_tobe_rate", "_realized_avg_rate"}
+    _ini_rate_cols = {"_asis_rate", "_tobe_rate", "_realized_avg_rate"}
     _ini_curr_cols = {
-        "customs_value", "duty_paid", "default_duties", "min_duties",
         "_initial_overpaid", "_final_overpaid", "_est_annual_cv", "_auto_annual_savings",
         "_post_cv", "_post_dp", "_auto_savings_realized", "_total_potential_savings", "_total_savings_realized",
     }
@@ -505,11 +526,6 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
     for _mc in _ini_curr_cols:
         if _mc in disp.columns:
             disp[_mc] = disp[_mc].apply(lambda v: _pre_fmt_num(v, False))
-    for mc in ["customs_value", "duty_paid", "default_duties", "min_duties"]:
-        if mc in disp.columns:
-            col_cfg[mc] = st.column_config.TextColumn(_FRIENDLY.get(mc, mc), disabled=True)
-    if "_applied_rate_disp" in disp.columns:
-        col_cfg["_applied_rate_disp"] = st.column_config.TextColumn("Applied Rate", disabled=True)
     for mc in ["_initial_overpaid", "_final_overpaid",
                "_est_annual_cv", "_auto_annual_savings",
                "_post_cv", "_post_dp", "_auto_savings_realized",
@@ -666,7 +682,7 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
         to_del = [
             int(edited_ini.iloc[i]["id"])
             for i in range(len(edited_ini))
-            if edited_ini.iloc[i].get("_select") is True or edited_ini.iloc[i].get("_select") == 1
+            if bool(edited_ini.iloc[i].get("_select", False))
         ]
         if to_del:
             n = _del_init(to_del)
@@ -740,6 +756,10 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
                 _d_orig_id  = _date_only(_ini.get("implementation_date", ""))
                 _d_end_disp = _safe_str(_ini.get("_end_date"))
 
+                _d_orig_ed  = _date_only(_ini.get("end_date", ""))
+                # If no manual end_date stored, pre-fill with auto-computed value
+                _d_end_default = _d_orig_ed or _d_end_disp
+
                 dc1, dc2, dc3 = st.columns(3)
                 with dc1:
                     with st.container(border=True):
@@ -766,29 +786,32 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
                             label_visibility="collapsed",
                         )
                 with dc3:
-                    _end_value_html = (
-                        f'<div class="ini-date-readonly">{_d_end_disp}</div>'
-                        if _d_end_disp
-                        else '<div class="ini-date-readonly muted">—</div>'
-                    )
-                    st.markdown(
-                        f'<div class="ini-date-card-static">'
-                        f'<div class="ini-date-label">End Date (auto)</div>'
-                        f'{_end_value_html}'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                    with st.container(border=True):
+                        _auto_label = "" if _d_orig_ed else " (auto)"
+                        st.markdown(
+                            f'<div class="ini-date-label">End Date{_auto_label}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        _new_ed_val = st.text_input(
+                            "End Date", value=_d_end_default,
+                            key=f"ini_ed_{_ini_id}",
+                            placeholder="YYYY-MM-DD",
+                            label_visibility="collapsed",
+                        )
 
                 _sd_c, _ = st.columns([1, 5])
                 with _sd_c:
                     if st.button("Save Dates", key=f"save_dates_{_ini_id}", type="primary"):
                         _d_diff: dict = {"id": int(_ini_id)}
-                        _new_sd_v = str(_new_sd or "")[:10]
-                        _new_id_v = str(_new_id_val or "")[:10]
+                        _new_sd_v  = str(_new_sd or "")[:10]
+                        _new_id_v  = str(_new_id_val or "")[:10]
+                        _new_ed_v  = str(_new_ed_val or "")[:10]
                         if _new_sd_v != _d_orig_sd:
                             _d_diff["start_date"] = _new_sd_v or None
                         if _new_id_v != _d_orig_id:
                             _d_diff["implementation_date"] = _new_id_v or None
+                        if _new_ed_v != (_d_orig_ed or ""):
+                            _d_diff["end_date"] = _new_ed_v or None
                         if len(_d_diff) > 1:
                             _upd_init([_d_diff])
                             st.success("Dates saved.")
@@ -796,53 +819,56 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
                         else:
                             st.info("No changes detected.")
 
-                # ── PRE — Before Implementation ────────────────────────
-                _ini_section("PRE — Before Implementation")
-                # Row 1: factual input data (value → duties paid → rates → target)
-                _render_deflist([
-                    ("Customs Value",   _metric_value(_ini, "customs_value"),
-                     "Declared value of the goods at import, used as the taxable base for duty calculation."),
-                    ("Duty Paid",       _metric_value(_ini, "duty_paid"),
-                     "Total customs duties effectively paid before applying any preferential program."),
-                    ("As-is Rate",      _metric_value(_ini, "_asis_rate", True),
-                     "Effective duty rate before optimization.\nFormula: Duty Paid ÷ Customs Value × 100."),
-                    ("Duty To-Be Paid", _metric_value(_ini, "min_duties"),
-                     "Minimum duties applicable under the preferential program (e.g. FTA rate)."),
-                    ("To-Be Rate",      _metric_value(_ini, "_tobe_rate", True),
-                     "Target duty rate after applying the preferential program.\nFormula: Duty To-Be Paid ÷ Customs Value × 100."),
-                ], cols=5)
-                # Row 2: derived savings potential
-                _render_deflist([
-                    ("Initial Overpaid",         _metric_value(_ini, "_initial_overpaid"),
-                     "Estimated overpayment relative to the program minimum.\nFormula: Duty Paid − Duty To-Be Paid."),
-                    ("Potential Reimbursements", _metric_value(_ini, "potential_reimbursements"),
-                     "Manually entered estimate of duties eligible for reimbursement from customs authorities."),
-                    ("Total Potential Savings",  _metric_value(_ini, "_total_potential_savings"),
-                     "Combined savings potential for this initiative.\nFormula: Est. Annual Savings + Potential Reimbursements."),
-                ], cols=3)
+                # ── PRE / POST — compact comparison table ──────────────
+                def _mv(key, is_rate=False):
+                    return _metric_value(_ini, key, is_rate)
 
-                # ── POST — After Implementation ────────────────────────
-                _ini_section("POST — After Implementation")
-                # Row 1: factual post-implementation volume & rate (mirrors PRE row 1)
-                _render_deflist([
-                    ("Total Customs Value", _metric_value(_ini, "_post_cv"),
-                     "Cumulative customs value of transactions recorded after implementation (rolling 12-month window)."),
-                    ("Total Duty Paid",     _metric_value(_ini, "_post_dp"),
-                     "Total duties paid on post-implementation transactions within the 12-month window."),
-                    ("Realized Avg. Rate",  _metric_value(_ini, "_realized_avg_rate", True),
-                     "Effective duty rate achieved after implementation.\nFormula: Total Duty Paid ÷ Total Customs Value × 100."),
-                ], cols=3)
-                # Row 2: realized savings & outcome (mirrors PRE row 2)
-                _render_deflist([
-                    ("Duty Savings Realized",   _metric_value(_ini, "_auto_savings_realized"),
-                     "Savings auto-computed from post-implementation transactions.\nFormula: (Pre As-is Rate − Realized Avg. Rate) × Total Customs Value."),
-                    ("Reimbursements Realized", _metric_value(_ini, "reimbursements"),
-                     "Actual reimbursements received from customs authorities, entered manually."),
-                    ("Final Overpaid",          _metric_value(_ini, "_final_overpaid"),
-                     "Remaining overpayment after deducting reimbursements received.\nFormula: Initial Overpaid − Reimbursements Realized."),
-                    ("Total Savings Realized",  _metric_value(_ini, "_total_savings_realized"),
-                     "Total confirmed savings for this initiative.\nFormula: Duty Savings Realized + Reimbursements Realized."),
-                ], cols=4)
+                _cmp_rows = [
+                    # (metric, pre_label, pre_val, post_label, post_val, highlight, separator)
+                    ("Customs Value",         "PRE",              _mv("customs_value"),             "POST",                   _mv("_post_cv"),                  False, False),
+                    ("Duty Paid",             "PRE",              _mv("duty_paid"),                 "POST",                   _mv("_post_dp"),                  False, False),
+                    ("Effective Rate",        "As-is",            _mv("_asis_rate", True),          "Realized",               _mv("_realized_avg_rate", True),  False, False),
+                    ("Duty To-Be Paid",       "",                 _mv("min_duties"),                "",                       "",                               False, False),
+                    ("To-Be Rate",            "",                 _mv("_tobe_rate", True),          "",                       "",                               False, True),
+                    ("Est. Annual CV",        "",                 _mv("_est_annual_cv"),            "",                       "",                               False, False),
+                    ("Annual Savings",        "Estimated",        _mv("_auto_annual_savings"),      "Realized",               _mv("_auto_savings_realized"),    False, False),
+                    ("Overpaid",              "Initial",          _mv("_initial_overpaid"),         "Final",                  _mv("_final_overpaid"),           False, False),
+                    ("Reimbursements",        "Potential",        _mv("potential_reimbursements"),  "Realized",               _mv("reimbursements"),            False, True),
+                    ("Total Savings",         "Potential",        _mv("_total_potential_savings"),  "Realized",               _mv("_total_savings_realized"),   True,  False),
+                ]
+
+                _tbl_rows_html = []
+                for _metric, _pre_lbl, _pre_val, _post_lbl, _post_val, _hi, _sep in _cmp_rows:
+                    _bg     = "rgba(64,224,208,0.12)" if _hi else "transparent"
+                    _v_sz   = "18px" if _hi else "15px"
+                    _v_fw   = "700"  if _hi else "500"
+                    _v_col  = "#40E0D0" if _hi else "rgba(255,255,255,0.88)"
+                    _pre_v  = _html.escape(str(_pre_val  or "—"))
+                    _post_v = _html.escape(str(_post_val or "—")) if _post_val != "" else "—"
+                    _pre_sub  = f'<span style="font-size:10px;color:rgba(255,255,255,.40);margin-left:4px">{_html.escape(_pre_lbl)}</span>'  if _pre_lbl  else ""
+                    _post_sub = f'<span style="font-size:10px;color:rgba(255,255,255,.40);margin-left:4px">{_html.escape(_post_lbl)}</span>' if _post_lbl else ""
+                    _border_top = "border-top:1px solid rgba(255,255,255,0.12);" if _sep else ""
+                    _tbl_rows_html.append(
+                        f'<tr style="background:{_bg};{_border_top}">'
+                        f'<td style="padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:rgba(255,255,255,.50);width:26%;border-bottom:1px solid rgba(255,255,255,.05)">{_html.escape(_metric)}</td>'
+                        f'<td style="padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.05)">'
+                        f'<span style="font-size:{_v_sz};font-weight:{_v_fw};color:{_v_col}">{_pre_v}</span>{_pre_sub}</td>'
+                        f'<td style="padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.05)">'
+                        f'<span style="font-size:{_v_sz};font-weight:{_v_fw};color:{_v_col}">{_post_v}</span>{_post_sub}</td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    f"""<table style="width:100%;border-collapse:collapse;margin-top:6px">
+<thead><tr>
+  <th style="padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.40);text-align:left;border-bottom:2px solid rgba(255,255,255,.12)">Metric</th>
+  <th style="padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#C2A3FF;text-align:left;border-bottom:2px solid #9B59B6">PRE — Before</th>
+  <th style="padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#40E0D0;text-align:left;border-bottom:2px solid #40E0D0">POST — After</th>
+</tr></thead>
+<tbody>{"".join(_tbl_rows_html)}</tbody>
+</table>""",
+                    unsafe_allow_html=True,
+                )
 
                 # ── TRANSACTIONS ───────────────────────────────────────
                 _ini_section("Transactions")

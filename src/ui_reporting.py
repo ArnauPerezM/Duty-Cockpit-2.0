@@ -23,8 +23,6 @@ from src.ui_shared import (
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-_CARD_BG = "rgba(255,255,255,0.03)"
-_BORDER   = "rgba(255,255,255,0.10)"
 
 _PURPLE_SCALE = [
     [0.0,  "rgba(70,0,115,0.15)"],
@@ -32,6 +30,14 @@ _PURPLE_SCALE = [
     [0.5,  "rgba(161,0,255,0.60)"],
     [0.75, "rgba(194,163,255,0.80)"],
     [1.0,  "rgba(230,220,255,1.0)"],
+]
+
+_HEAT_SCALE = [
+    [0.0,  "#111318"],
+    [0.30, "#2d1a4a"],
+    [0.60, "#6a2fa0"],
+    [0.85, "#c0a0f0"],
+    [1.0,  "#ecdeff"],
 ]
 
 # Minimal ISO-2 → ISO-3 lookup (covers most trade-relevant countries)
@@ -83,7 +89,7 @@ def _styled_fig(fig: go.Figure, height: int = 280) -> go.Figure:
     fig.update_layout(
         height=height,
         template="plotly_dark",
-        paper_bgcolor=_CARD_BG,
+        paper_bgcolor="rgba(255,255,255,0.03)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=8, r=8, t=32, b=8),
         font=dict(family="sans-serif", size=12, color="rgba(255,255,255,0.80)"),
@@ -168,8 +174,8 @@ def render_tab_reporting(
             if _c in _ini_s.columns:
                 _ini_s[_c] = pd.to_numeric(_ini_s[_c], errors="coerce").fillna(0.0)
         ini_savings_realized = float(
-            _ini_s.get("savings_realized", pd.Series([0.0])).sum()
-            + _ini_s.get("reimbursements", pd.Series([0.0])).sum()
+            (_ini_s["savings_realized"].sum() if "savings_realized" in _ini_s.columns else 0.0)
+            + (_ini_s["reimbursements"].sum() if "reimbursements" in _ini_s.columns else 0.0)
         )
 
     # ── Download Report button (top-right, own row) ───────────────────────────
@@ -194,29 +200,54 @@ def render_tab_reporting(
             st.warning(f"Report error: {_rep_err}")
 
     # ── KPI cards — 5 columns full width ─────────────────────────────────────
+    _capture_rate = (ini_savings_realized / overpaid_total * 100) if overpaid_total > 0 else 0.0
     _render_kpi_cards(cols=5, kpis=[
         {"label": "Total Customs Value", "value": f"{_fmt_num(total_cv)} €",
          "sub": "Cumulative across all runs"},
         {"label": "Total Duty Paid",     "value": f"{_fmt_num(total_dp)} €",
          "sub": "Reported duty exposure"},
-        {"label": "Avg Effective Rate",  "value": f"{avg_rate:.1f}%",
-         "sub": "Duty Paid / Customs Value"},
         {"label": "Overpaid Duties",     "value": f"{_fmt_num(overpaid_total)} €",
-         "sub": "Duty Paid − Min Duties (all transactions)",
-         "delta": "savings opportunity", "delta_kind": "good"},
+         "sub": "Duty Paid − Min Duties (all transactions)"},
         {"label": "Savings Realized",    "value": f"{_fmt_num(ini_savings_realized)} €",
-         "sub": "FTA savings + reimbursements from initiatives",
-         "delta": "from initiatives", "delta_kind": "good"},
+         "sub": "FTA savings + reimbursements from initiatives"},
+        {"label": "Savings Capture Rate", "value": f"{_capture_rate:.1f}%",
+         "sub": "Savings Realized / Overpaid Duties"},
     ])
 
-    # ── 1. World Map — Duty Paid by COI ──────────────────────────────────────
-    _section("Duty Paid by Country of Import")
+    # ── 1. World Map ──────────────────────────────────────────────────────────
+    _section("World Map by Country of Import")
 
-    if "coi" in df.columns and "duty paid" in df.columns:
+    _map_opts_avail = []
+    if "customs value" in df.columns: _map_opts_avail.append("Customs Value")
+    if "duty paid"     in df.columns: _map_opts_avail.append("Duty Paid")
+    if "duty paid" in df.columns and "Minimum Duties" in df.columns:
+        _map_opts_avail.append("Overpaid Duties")
+
+    if "coi" in df.columns and _map_opts_avail:
+        _map_sel, _map_spacer = st.columns([2, 8])
+        with _map_sel:
+            _map_metric = st.selectbox(
+                "Metric", _map_opts_avail,
+                index=_map_opts_avail.index("Duty Paid") if "Duty Paid" in _map_opts_avail else 0,
+                key="rep_map_metric",
+                label_visibility="collapsed",
+            )
+
+        _df_map = df.copy()
+        if _map_metric == "Customs Value":
+            _map_src, _map_label = "customs value", "Customs Value (€)"
+        elif _map_metric == "Overpaid Duties":
+            _df_map["_map_val"] = (
+                _df_map["duty paid"] - _df_map["Minimum Duties"].fillna(_df_map["duty paid"])
+            ).clip(lower=0)
+            _map_src, _map_label = "_map_val", "Overpaid Duties (€)"
+        else:
+            _map_src, _map_label = "duty paid", "Duty Paid (€)"
+
         map_df = (
-            df.groupby("coi", as_index=False)["duty paid"]
+            _df_map.groupby("coi", as_index=False)[_map_src]
             .sum()
-            .rename(columns={"coi": "COI", "duty paid": "Duty Paid (€)"})
+            .rename(columns={"coi": "COI", _map_src: _map_label})
         )
         map_df["iso3"] = map_df["COI"].apply(_iso3)
         map_df = map_df.dropna(subset=["iso3"])
@@ -225,11 +256,11 @@ def render_tab_reporting(
             fig_map = px.choropleth(
                 map_df,
                 locations="iso3",
-                color="Duty Paid (€)",
+                color=_map_label,
                 hover_name="COI",
-                hover_data={"iso3": False, "Duty Paid (€)": ":,.0f"},
+                hover_data={"iso3": False, _map_label: ":,.0f"},
                 color_continuous_scale=_PURPLE_SCALE,
-                labels={"Duty Paid (€)": "Duty Paid (€)"},
+                labels={_map_label: _map_label},
             )
             fig_map.update_geos(
                 showframe=False,
@@ -255,20 +286,45 @@ def render_tab_reporting(
         else:
             st.caption("No valid country codes found for map rendering.")
     else:
-        st.caption("COI or Duty Paid columns unavailable.")
+        st.caption("COI column or required metrics unavailable.")
 
-    # ── 2. Top COI (Overpaid) + COO (Customs Value) bars ─────────────────────
-    _section("Top Import Markets — Overpaid Duties & Origin Customs Value")
+    # ── 2. Top 10 Import Countries — Duties Paid (left) + Overpaid (right) ──────
+    _section("Top 10 Import Countries — Duties Paid & Overpaid")
 
     col_l, col_r = st.columns(2)
 
     with col_l:
+        if "coi" in df.columns and "duty paid" in df.columns:
+            top_dp = (
+                df.groupby("coi", as_index=False)["duty paid"]
+                .sum()
+                .sort_values("duty paid", ascending=False)
+                .head(10)
+                .rename(columns={"coi": "COI", "duty paid": "Duty Paid (€)"})
+                .sort_values("Duty Paid (€)", ascending=True)
+            )
+            if not top_dp.empty:
+                fig_dp = px.bar(
+                    top_dp, x="Duty Paid (€)", y="COI", orientation="h",
+                    title="Top 10 Import Countries — Duties Paid",
+                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE],
+                    text="Duty Paid (€)",
+                )
+                fig_dp.update_traces(texttemplate="%{text:,.0f} €", textposition="outside", textfont=dict(size=10))
+                fig_dp.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False,
+                                     xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False))
+                _styled_fig(fig_dp, height=300)
+                _chart_card(fig_dp)
+            else:
+                st.caption("No duty paid data found.")
+
+    with col_r:
         if "coi" in df.columns and "duty paid" in df.columns and "Minimum Duties" in df.columns:
             _df_op = df.copy()
             _df_op["_overpaid"] = (
                 _df_op["duty paid"] - _df_op["Minimum Duties"].fillna(_df_op["duty paid"])
             ).clip(lower=0)
-            top_coi = (
+            top_op = (
                 _df_op.groupby("coi", as_index=False)["_overpaid"]
                 .sum()
                 .query("_overpaid > 0")
@@ -277,141 +333,125 @@ def render_tab_reporting(
                 .rename(columns={"coi": "COI", "_overpaid": "Overpaid Duties (€)"})
                 .sort_values("Overpaid Duties (€)", ascending=True)
             )
-            if not top_coi.empty:
-                fig_coi = px.bar(
-                    top_coi,
-                    x="Overpaid Duties (€)", y="COI",
-                    orientation="h",
+            if not top_op.empty:
+                fig_op = px.bar(
+                    top_op, x="Overpaid Duties (€)", y="COI", orientation="h",
                     title="Top 10 Import Countries — Overpaid Duties",
-                    color_discrete_sequence=[ACCENTURE_PURPLE_CORE],
+                    color_discrete_sequence=[ACCENTURE_PURPLE_LIGHT],
                     text="Overpaid Duties (€)",
                 )
-                fig_coi.update_traces(
-                    texttemplate="%{text:,.0f} €",
-                    textposition="outside",
-                    textfont=dict(size=10),
-                )
-                fig_coi.update_layout(
-                    xaxis_title=None, yaxis_title=None,
-                    showlegend=False,
-                    xaxis=dict(showgrid=False, zeroline=False),
-                    yaxis=dict(showgrid=False),
-                )
-                _styled_fig(fig_coi, height=300)
-                _chart_card(fig_coi)
+                fig_op.update_traces(texttemplate="%{text:,.0f} €", textposition="outside", textfont=dict(size=10))
+                fig_op.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False,
+                                     xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False))
+                _styled_fig(fig_op, height=300)
+                _chart_card(fig_op)
             else:
                 st.caption("No overpaid duties found.")
-        elif "coi" in df.columns and "duty paid" in df.columns:
-            top_coi = (
-                df.groupby("coi", as_index=False)["duty paid"]
-                .sum()
-                .sort_values("duty paid", ascending=False)
-                .head(10)
-                .rename(columns={"coi": "COI", "duty paid": "Duty Paid (€)"})
-                .sort_values("Duty Paid (€)", ascending=True)
-            )
-            fig_coi = px.bar(
-                top_coi, x="Duty Paid (€)", y="COI", orientation="h",
-                title="Top 10 Import Countries — Duty Paid",
-                color_discrete_sequence=[ACCENTURE_PURPLE_CORE], text="Duty Paid (€)",
-            )
-            fig_coi.update_traces(texttemplate="%{text:,.0f} €", textposition="outside", textfont=dict(size=10))
-            fig_coi.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False,
-                                  xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False))
-            _styled_fig(fig_coi, height=300)
-            _chart_card(fig_coi)
 
-    with col_r:
-        if "coo" in df.columns and "customs value" in df.columns:
-            top_coo = (
-                df.groupby("coo", as_index=False)["customs value"]
-                .sum()
-                .sort_values("customs value", ascending=False)
-                .head(10)
-                .rename(columns={"coo": "COO", "customs value": "Customs Value (€)"})
-            )
-            top_coo = top_coo.sort_values("Customs Value (€)", ascending=True)
+    # ── 3. Heat Map — COO × COI ──────────────────────────────────────────────
+    _section("Heat Map (Origin × Import Country)")
 
-            fig_coo = px.bar(
-                top_coo,
-                x="Customs Value (€)", y="COO",
-                orientation="h",
-                title="Top 10 Origin Countries — Customs Value",
-                color_discrete_sequence=[ACCENTURE_PURPLE_LIGHT],
-                text="Customs Value (€)",
-            )
-            fig_coo.update_traces(
-                texttemplate="%{text:,.0f} €",
-                textposition="outside",
-                textfont=dict(size=10),
-            )
-            fig_coo.update_layout(
-                xaxis_title=None, yaxis_title=None,
-                showlegend=False,
-                xaxis=dict(showgrid=False, zeroline=False),
-                yaxis=dict(showgrid=False),
-            )
-            _styled_fig(fig_coo, height=300)
-            _chart_card(fig_coo)
+    _heat_cols_avail = []
+    if "customs value" in df.columns: _heat_cols_avail.append("Customs Value")
+    if "duty paid"     in df.columns: _heat_cols_avail.append("Duty Paid")
+    if "duty paid" in df.columns and "Minimum Duties" in df.columns: _heat_cols_avail.append("Savings Realized")
 
-    # ── 3. Heat Map — COO × COI duty intensity ────────────────────────────────
-    _section("Duty Intensity Heat Map (Origin × Import Country)")
+    if "coo" in df.columns and "coi" in df.columns and _heat_cols_avail:
+        _heat_metric = st.selectbox(
+            "Metric", _heat_cols_avail,
+            key="rep_heat_metric",
+            label_visibility="collapsed",
+        )
 
-    if "coo" in df.columns and "coi" in df.columns and "duty paid" in df.columns:
+        _df_heat = df.copy()
+        if _heat_metric == "Customs Value":
+            _heat_col_src = "customs value"
+            _heat_label   = "Customs Value (€)"
+            _heat_hover   = "Customs Value"
+        elif _heat_metric == "Savings Realized":
+            _df_heat["_heat_val"] = (
+                _df_heat["duty paid"] - _df_heat["Minimum Duties"].fillna(_df_heat["duty paid"])
+            ).clip(lower=0)
+            _heat_col_src = "_heat_val"
+            _heat_label   = "Overpaid Duties (€)"
+            _heat_hover   = "Overpaid"
+        else:
+            _heat_col_src = "duty paid"
+            _heat_label   = "Duty Paid (€)"
+            _heat_hover   = "Duty Paid"
+
         top_coo_list = (
-            df.groupby("coo")["duty paid"].sum()
-            .sort_values(ascending=False)
-            .head(12)
-            .index.tolist()
+            _df_heat.groupby("coo")[_heat_col_src].sum()
+            .sort_values(ascending=False).head(12).index.tolist()
         )
         top_coi_list = (
-            df.groupby("coi")["duty paid"].sum()
-            .sort_values(ascending=False)
-            .head(12)
-            .index.tolist()
+            _df_heat.groupby("coi")[_heat_col_src].sum()
+            .sort_values(ascending=False).head(12).index.tolist()
         )
-
         heat_df = (
-            df[df["coo"].isin(top_coo_list) & df["coi"].isin(top_coi_list)]
-            .groupby(["coo", "coi"], as_index=False)["duty paid"]
-            .sum()
+            _df_heat[_df_heat["coo"].isin(top_coo_list) & _df_heat["coi"].isin(top_coi_list)]
+            .groupby(["coo", "coi"], as_index=False)[_heat_col_src].sum()
         )
 
         if not heat_df.empty:
-            pivot = heat_df.pivot(index="coo", columns="coi", values="duty paid").fillna(0)
-            # Order axes by total
+            pivot = heat_df.pivot(index="coo", columns="coi", values=_heat_col_src).fillna(0)
             pivot = pivot.loc[
                 pivot.sum(axis=1).sort_values(ascending=False).index,
                 pivot.sum(axis=0).sort_values(ascending=False).index,
             ]
+            # Format text annotations (K / M)
+            def _fmt_cell(v):
+                if v == 0: return ""
+                if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
+                if v >= 1_000:     return f"{v/1_000:.0f}K"
+                return f"{v:.0f}"
+
+            _zmax = pivot.values.max() if pivot.values.max() > 0 else 1
 
             fig_heat = go.Figure(go.Heatmap(
                 z=pivot.values,
                 x=pivot.columns.tolist(),
                 y=pivot.index.tolist(),
-                colorscale=_PURPLE_SCALE,
+                colorscale=_HEAT_SCALE,
                 hoverongaps=False,
-                hovertemplate="COO: %{y}<br>COI: %{x}<br>Duty Paid: %{z:,.0f} €<extra></extra>",
+                xgap=3, ygap=3,
+                hovertemplate=f"COO: %{{y}}<br>COI: %{{x}}<br>{_heat_hover}: %{{z:,.0f}} €<extra></extra>",
                 colorbar=dict(
                     thickness=10,
                     tickfont=dict(size=10, color="rgba(255,255,255,0.60)"),
                     title=dict(text="€", font=dict(size=10)),
                 ),
             ))
+            # Per-cell text annotations with contrast-aware colour
+            for ri, row_vals in enumerate(pivot.values):
+                for ci, v in enumerate(row_vals):
+                    if v == 0:
+                        continue
+                    fig_heat.add_annotation(
+                        x=pivot.columns[ci], y=pivot.index[ri],
+                        text=_fmt_cell(v),
+                        showarrow=False,
+                        font=dict(
+                            size=11,
+                            color="#1a0a2e" if v / _zmax > 0.55 else "rgba(255,255,255,0.88)",
+                        ),
+                        xref="x", yref="y",
+                    )
+
             fig_heat.update_layout(
                 xaxis=dict(title="Country of Import", tickangle=-35),
                 yaxis=dict(title="Country of Origin", autorange="reversed"),
-                title="Duty Paid (€) — Top 12 Origins × Top 12 Import Markets",
+                title=f"{_heat_metric} (€) — Top 12 Origins × Top 12 Import Markets",
             )
-            _styled_fig(fig_heat, height=380)
+            _styled_fig(fig_heat, height=420)
             _chart_card(fig_heat)
         else:
             st.caption("Not enough COO/COI combinations for heat map.")
     else:
-        st.caption("COO, COI or Duty Paid columns unavailable.")
+        st.caption("COO, COI or metric columns unavailable.")
 
-    # ── 4. Monthly Trend ──────────────────────────────────────────────────────
-    _section("Monthly Trend")
+    # ── 4. Monthly Trend — Duty Paid vs Overpaid Duties ──────────────────────
+    _section("Monthly Trend — Duty Paid vs Overpaid Duties")
 
     _date_col = next(
         (c for c in ["Input Date", "input_date", "ref_date", "date"] if c in df.columns),
@@ -423,46 +463,53 @@ def render_tab_reporting(
         trend = trend.dropna(subset=["_month"])
 
         if not trend.empty:
-            monthly = (
-                trend.groupby("_month")
-                .agg(
-                    **{
-                        "Duty Paid (€)": ("duty paid", "sum"),
-                        **({"Customs Value (€)": ("customs value", "sum")} if "customs value" in trend.columns else {}),
-                    }
-                )
-                .reset_index()
-            )
+            _has_min = "Minimum Duties" in trend.columns
+            _agg = {"Duty Paid": ("duty paid", "sum")}
+            if _has_min:
+                _agg["Minimum Duties"] = ("Minimum Duties", "sum")
+
+            monthly = trend.groupby("_month").agg(**_agg).reset_index()
             monthly["_month"] = monthly["_month"].astype(str)
+            if _has_min:
+                monthly["Minimum Duties"] = monthly["Minimum Duties"].fillna(monthly["Duty Paid"])
 
             fig_trend = go.Figure()
-            if "Customs Value (€)" in monthly.columns:
+
+            # Trace 1 (bottom): Minimum Duties — fill to x-axis (efficient portion)
+            if _has_min:
                 fig_trend.add_trace(go.Scatter(
-                    x=monthly["_month"], y=monthly["Customs Value (€)"],
-                    name="Customs Value",
+                    x=monthly["_month"], y=monthly["Minimum Duties"],
+                    name="Minimum Duties",
                     mode="lines+markers",
-                    line=dict(color=ACCENTURE_PURPLE_LIGHT, width=2),
-                    marker=dict(size=5),
-                    hovertemplate="%{x}<br>Customs Value: %{y:,.0f} €<extra></extra>",
+                    line=dict(color=ACCENTURE_PURPLE_LIGHT, width=2, dash="dot"),
+                    marker=dict(size=4),
+                    fill="tozeroy",
+                    fillcolor="rgba(161,0,255,0.18)",
+                    hovertemplate="%{x}<br>Min Duties: %{y:,.0f} €<extra></extra>",
                 ))
+
+            # Trace 2 (top): Duty Paid — fill to previous trace = Overpaid area (amber)
             fig_trend.add_trace(go.Scatter(
-                x=monthly["_month"], y=monthly["Duty Paid (€)"],
+                x=monthly["_month"], y=monthly["Duty Paid"],
                 name="Duty Paid",
                 mode="lines+markers",
                 line=dict(color=ACCENTURE_PURPLE_CORE, width=2),
                 marker=dict(size=5),
-                fill="tozeroy",
-                fillcolor="rgba(161,0,255,0.08)",
+                fill="tonexty" if _has_min else "tozeroy",
+                fillcolor="rgba(161,0,255,0.35)" if _has_min else "rgba(161,0,255,0.20)",
                 hovertemplate="%{x}<br>Duty Paid: %{y:,.0f} €<extra></extra>",
             ))
+
             fig_trend.update_layout(
-                title="Duty Paid & Customs Value — Monthly",
+                title="Monthly Duty Paid vs Minimum Duties (amber area = Overpaid)",
                 xaxis=dict(title=None, showgrid=False, tickangle=-35),
                 yaxis=dict(title="EUR", showgrid=True,
                            gridcolor="rgba(255,255,255,0.06)"),
                 hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1, font=dict(size=12)),
             )
-            _styled_fig(fig_trend, height=280)
+            _styled_fig(fig_trend, height=300)
             _chart_card(fig_trend)
         else:
             st.caption("No valid date data for trend chart.")
@@ -470,62 +517,86 @@ def render_tab_reporting(
         st.caption("Date column not available for trend chart.")
 
     # ── 5. Initiative Impact ──────────────────────────────────────────────────
-    _section("Initiative Impact — PRE vs POST")
+    _section("Initiative Impact")
 
     if df_initiatives is not None and not df_initiatives.empty:
         _ini = df_initiatives.copy()
-        for _c in ["duty_paid", "min_duties", "savings_realized", "reimbursements", "potential_reimbursements"]:
+        for _c in ["duty_paid", "min_duties", "savings_realized", "reimbursements",
+                   "potential_reimbursements", "customs_value"]:
             if _c in _ini.columns:
                 _ini[_c] = pd.to_numeric(_ini[_c], errors="coerce").fillna(0.0)
-        _ini["_pre_overpaid"] = (_ini["duty_paid"] - _ini["min_duties"]).clip(lower=0)
-        _ini["_post_realized"] = (
-            _ini.get("savings_realized", pd.Series([0.0] * len(_ini), index=_ini.index))
-            + _ini.get("reimbursements", pd.Series([0.0] * len(_ini), index=_ini.index))
-        )
 
-        _imp_l, _imp_r = st.columns([3, 2])
+        # Compute annual expected savings via cross-reference with transactions
+        try:
+            from src.ui_initiatives import _compute_initiative_metrics as _cim
+            _auto_df = _cim(_ini, df)
+            _ini = _ini.merge(
+                _auto_df[["id", "_auto_annual_savings", "_auto_savings_realized"]],
+                on="id", how="left",
+            )
+            for _ac in ["_auto_annual_savings", "_auto_savings_realized"]:
+                _ini[_ac] = pd.to_numeric(_ini[_ac], errors="coerce").fillna(0.0)
+        except Exception:
+            _ini["_auto_annual_savings"]  = 0.0
+            _ini["_auto_savings_realized"] = 0.0
+
+        _imp_l, _imp_r = st.columns([5, 3])
 
         with _imp_l:
             if "coi" in _ini.columns:
-                _pre_g  = _ini.groupby("coi")["_pre_overpaid"].sum().reset_index()
-                _pre_g["phase"] = "PRE — Overpaid"
-                _pre_g  = _pre_g.rename(columns={"_pre_overpaid": "value"})
-                _post_g = _ini.groupby("coi")["_post_realized"].sum().reset_index()
-                _post_g["phase"] = "POST — Realized"
-                _post_g = _post_g.rename(columns={"_post_realized": "value"})
-                _impact_df = pd.concat([_pre_g, _post_g])
+                _exp_g = _ini.groupby("coi")["_auto_annual_savings"].sum().reset_index()
+                _exp_g["metric"] = "Est. Annual Savings"
+                _exp_g = _exp_g.rename(columns={"_auto_annual_savings": "value"})
+
+                _real_g = _ini.groupby("coi")["_auto_savings_realized"].sum().reset_index()
+                _real_g["metric"] = "Savings Realized (annual)"
+                _real_g = _real_g.rename(columns={"_auto_savings_realized": "value"})
+
+                _impact_df = pd.concat([_exp_g, _real_g])
                 _impact_df = _impact_df[_impact_df["value"] > 0]
                 if not _impact_df.empty:
                     _coi_order = (
-                        _pre_g.sort_values("value", ascending=False)["coi"].tolist()
+                        _exp_g.sort_values("value", ascending=False)["coi"].tolist()
                     )
                     fig_imp = px.bar(
-                        _impact_df, x="value", y="coi", color="phase",
+                        _impact_df, x="value", y="coi", color="metric",
                         orientation="h", barmode="group",
-                        title="Overpaid (PRE) vs Savings Realized (POST) by COI",
                         color_discrete_sequence=[ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT],
                         category_orders={"coi": _coi_order},
+                        labels={"value": "", "coi": "", "metric": ""},
                     )
                     fig_imp.update_traces(
                         hovertemplate="<b>%{y}</b><br>%{fullData.name}: %{x:,.0f} €<extra></extra>",
                     )
+                    _styled_fig(fig_imp, height=320)
                     fig_imp.update_layout(
+                        title="Est. Annual Savings vs Savings Realized by COI",
                         xaxis_title=None, yaxis_title=None,
-                        xaxis=dict(ticksuffix=" €", tickformat=".2s", showgrid=False, zeroline=False),
-                        yaxis=dict(showgrid=False),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                                    font=dict(size=11)),
+                        margin=dict(l=8, r=8, t=40, b=52),
+                        legend=dict(
+                            orientation="h", yanchor="top", y=-0.12,
+                            xanchor="center", x=0.5, font=dict(size=11),
+                            bgcolor="rgba(0,0,0,0)", title_text="",
+                        ),
                     )
-                    _styled_fig(fig_imp, height=300)
+                    fig_imp.update_xaxes(
+                        ticksuffix=" €", tickformat=".2s",
+                        showgrid=True, gridcolor="rgba(255,255,255,0.07)",
+                        zeroline=False,
+                        showline=True, linecolor="rgba(255,255,255,0.25)", linewidth=1,
+                    )
+                    fig_imp.update_yaxes(
+                        showgrid=False,
+                        showline=True, linecolor="rgba(255,255,255,0.25)", linewidth=1,
+                    )
                     _chart_card(fig_imp)
                 else:
-                    st.caption("No initiative values to display yet.")
+                    st.caption("No initiative savings data to display yet.")
 
         with _imp_r:
             if "status" in _ini.columns:
                 _st_cnt = _ini.groupby("status").size().reset_index(name="count")
                 _total_ini = int(_st_cnt["count"].sum())
-                _total_pot = float(_ini["_pre_overpaid"].sum())
                 if not _st_cnt.empty:
                     _color_map = {
                         "Identified":  ACCENTURE_PURPLE_LIGHTEST,
@@ -548,25 +619,18 @@ def render_tab_reporting(
                     ))
                     fig_donut.update_layout(
                         title="Initiative Portfolio by Status",
-                        annotations=[
-                            dict(
-                                text=f"<b>{_total_ini}</b><br><span style='font-size:10px'>initiatives</span>",
-                                x=0.5, y=0.55, showarrow=False,
-                                font=dict(size=18, color="rgba(255,255,255,0.92)"),
-                                xanchor="center",
-                            ),
-                            dict(
-                                text=f"{_fmt_num(_total_pot)} €",
-                                x=0.5, y=0.38, showarrow=False,
-                                font=dict(size=12, color="rgba(255,255,255,0.55)"),
-                                xanchor="center",
-                            ),
-                        ],
+                        annotations=[dict(
+                            text=f"<b>{_total_ini}</b><br><span style='font-size:10px'>initiatives</span>",
+                            x=0.5, y=0.5, showarrow=False,
+                            font=dict(size=18, color="rgba(255,255,255,0.92)"),
+                            xanchor="center",
+                        )],
                         showlegend=True,
-                        legend=dict(orientation="h", yanchor="bottom", y=-0.15,
+                        legend=dict(orientation="h", yanchor="top", y=-0.12,
                                     xanchor="center", x=0.5, font=dict(size=11)),
                     )
-                    _styled_fig(fig_donut, height=300)
+                    _styled_fig(fig_donut, height=320)
+                    fig_donut.update_layout(margin=dict(l=8, r=8, t=40, b=52))
                     _chart_card(fig_donut)
                 else:
                     st.caption("No initiative status data yet.")

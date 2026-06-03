@@ -12,21 +12,91 @@
   --accenture-purple-lightest: #E6DCFF;
 }
 
-/* --- Hero header --- */
-.hero-wrap {
+/* --- Hero header (st.container key="hero_main") --- */
+.st-key-hero_main {
   border-radius: 16px;
-  padding: 18px 18px 14px 18px;
+  padding: 14px 18px 12px 18px;
   background: linear-gradient(135deg, rgba(70,0,115,0.55) 0%, rgba(161,0,255,0.20) 55%, rgba(255,255,255,0.02) 100%);
   border: 1px solid rgba(194,163,255,0.18);
   box-shadow: 0 10px 28px rgba(0,0,0,0.35);
   margin-bottom: 14px;
+  overflow: hidden;
 }
 
-.hero-top {
+/* Status chip + account chip HTML container */
+.hero-right {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+/* Right-side stack: both chips stretch to the same width,
+   container auto-sizes to the wider child and aligns right */
+.st-key-hero_right_stack {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;   /* children fill the container width */
+  width: fit-content !important;     /* container = width of widest child  */
+  margin-left: auto !important;      /* push container to the right edge   */
+}
+
+/* Chip stretches to full stack width */
+.st-key-hero_right_stack .hero-right,
+.st-key-hero_right_stack .hero-right .status-chip {
+  width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+/* Remove all extra padding/margin from Streamlit wrappers inside the stack */
+.st-key-hero_right_stack .stButton {
+  width: 100% !important;
+  margin-top: 4px !important;
+  padding: 0 !important;
+}
+/* Zero out any inner Streamlit-generated div that adds width */
+.st-key-hero_right_stack .stButton > div {
+  width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* Help button: same pill shape / size / font as .status-chip */
+.st-key-hero_right_stack .stButton button {
+  background: rgba(161,0,255,0.08) !important;
+  border: 1px solid rgba(194,163,255,0.22) !important;
+  border-radius: 999px !important;
+  color: rgba(255,255,255,0.85) !important;
+  padding: 7px 10px !important;
+  min-height: 0 !important;
+  height: auto !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  white-space: nowrap !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+/* ? icon — mirrors the status-dot in Ready */
+.st-key-hero_right_stack .stButton button::before {
+  content: "?";
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--accenture-purple-light);
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* "Help" label — zero out all inner element padding (works for p or div) */
+.st-key-hero_right_stack .stButton button * {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+.st-key-hero_right_stack .stButton button:hover {
+  background: rgba(161,0,255,0.20) !important;
+  border-color: rgba(194,163,255,0.45) !important;
 }
 
 .hero-title {
@@ -43,7 +113,7 @@
 }
 
 div.block-container {
-  padding-top: 1rem !important;
+  padding-top: 4rem !important;
 }
 
 .status-chip {

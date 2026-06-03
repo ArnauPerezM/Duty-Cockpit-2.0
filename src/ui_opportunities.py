@@ -113,10 +113,10 @@ def render_tab_opportunities(
     _render_kpi_cards([
         {"label": "# Transactions",   "value": _fmt_int(n_transactions),             "icon": "🧾", "sub": "Total filtered rows"},
         {"label": "# Opportunities",  "value": _fmt_int(n_opportunities),            "icon": "💡", "sub": "Rows with overpaid duties"},
-        {"label": "Customs Value",    "value": _fmt_num(customs_total)   + " €", "icon": "💶", "sub": "Sum of customs value"},
-        {"label": "Duty Exposure",    "value": _fmt_num(duty_exposure)   + " €", "icon": "📄", "sub": "Sum of default duties"},
-        {"label": "Duty Paid",        "value": _fmt_num(duty_paid_total) + " €", "icon": "💳", "sub": "Sum of duties paid"},
-        {"label": "Overpaid Duties",  "value": _fmt_num(overpaid_total)  + " €", "icon": "⚠️", "sub": "Duty Paid – Min Duties"},
+        {"label": "Customs Value",    "value": f"{_fmt_num(customs_total)} €",   "icon": "💶", "sub": "Sum of customs value"},
+        {"label": "Duty Exposure",    "value": f"{_fmt_num(duty_exposure)} €",   "icon": "📄", "sub": "Sum of default duties"},
+        {"label": "Duty Paid",        "value": f"{_fmt_num(duty_paid_total)} €", "icon": "💳", "sub": "Sum of duties paid"},
+        {"label": "Overpaid Duties",  "value": f"{_fmt_num(overpaid_total)} €",  "icon": "⚠️", "sub": "Duty Paid – Min Duties"},
     ], compact=True)
 
     st.markdown("")

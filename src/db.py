@@ -162,6 +162,7 @@ _INITIATIVES_NEW_COLS = [
     "group_name TEXT",
     "min_duty_rate REAL",
     "min_duty_program TEXT",
+    "end_date TEXT",
 ]
 
 
@@ -474,7 +475,8 @@ def find_duplicate_transactions(df: pd.DataFrame, ref_date: str = "") -> pd.Data
     _STR_SENTINEL = "__null__"
     _NUMERIC_COLS = {"customs value original", "weight"}
 
-    df_norm = df[merge_on].copy()
+    df_reset = df.reset_index(drop=True)
+    df_norm = df_reset[merge_on].copy()
     db_norm = db_keys[merge_on].drop_duplicates().copy()
 
     for col in merge_on:
@@ -487,7 +489,7 @@ def find_duplicate_transactions(df: pd.DataFrame, ref_date: str = "") -> pd.Data
 
     tagged = df_norm.merge(db_norm, on=merge_on, how="left", indicator=True)
     is_dup = (tagged["_merge"] == "both").values
-    return df[is_dup].copy()
+    return df_reset.iloc[is_dup].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -765,8 +767,8 @@ def _float(v) -> Optional[float]:
 
 _INITIATIVES_EDITABLE = frozenset({
     "status", "savings_realized", "reimbursements",
-    "implementation_date", "start_date", "comments", "potential_reimbursements",
-    "min_duty_program",
+    "implementation_date", "start_date", "end_date", "comments",
+    "potential_reimbursements", "min_duty_program",
 })
 
 _INITIATIVES_STATUS_OPTIONS = ["Identified", "Validated", "Discarded", "Completed"]
@@ -831,7 +833,7 @@ def load_initiatives() -> pd.DataFrame:
         "coo", "coi", "hs_code", "material_number",
         "min_duty_program", "program_description",
         "status", "comments", "group_name",
-        "start_date", "implementation_date", "created_at",
+        "start_date", "implementation_date", "end_date", "created_at",
     })
     return _coerce_string_cols(df, _str_cols)
 
@@ -929,9 +931,13 @@ def backup_db() -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        with sqlite3.connect(str(db_path)) as src:
-            with sqlite3.connect(str(tmp_path)) as dst:
-                src.backup(dst)
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(tmp_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
         return tmp_path.read_bytes()
     finally:
         tmp_path.unlink(missing_ok=True)

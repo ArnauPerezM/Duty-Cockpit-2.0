@@ -31,6 +31,7 @@ from src.ui import (
 )
 from src.ui_shared import load_custom_css
 from src.db import load_initiatives, init_db
+from src.ui_help import render_help_dialog
 
 
 init_session_state()
@@ -67,12 +68,13 @@ with st.sidebar:
             st.session_state.account_label = ""
             st.rerun()
 
-render_hero_header(
+if render_hero_header(
     title="Duty Analyzer",
     subtitle="",
     run_state=st.session_state.run_state,
     account_label=st.session_state.account_label,
-)
+):
+    render_help_dialog()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab navigation — controlled by st.session_state.active_tab so reruns
