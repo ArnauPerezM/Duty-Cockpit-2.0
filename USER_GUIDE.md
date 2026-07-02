@@ -1,10 +1,10 @@
-# Duty Analyzer — User Guide
+﻿# Duty Optimizer — User Guide
 
 ## Overview
 
-Duty Analyzer is a desktop application built to automate customs duty analysis through the E2Open API. It ingests transaction data from Excel, queries E2Open for applicable duty programs and rates, identifies overpayment opportunities, tracks duty optimization initiatives, and produces executive-level reports.
+Duty Optimizer is a desktop application built to automate customs duty analysis through the e2open API. It ingests transaction data from Excel, queries e2open for applicable duty programs and rates, identifies overpayment opportunities, tracks duty optimization initiatives, and produces executive-level reports.
 
-The app stores all results locally in a SQLite database. No data is sent to any cloud service outside of E2Open API calls during analysis runs.
+The app stores all results locally in a SQLite database. No data is sent to any cloud service outside of e2open API calls during analysis runs.
 
 ---
 
@@ -14,7 +14,7 @@ The app has six sections accessible via the tab bar below the header:
 
 | Tab | Purpose |
 |---|---|
-| **Process** | Upload transactions, connect to E2Open, run analysis |
+| **Process** | Upload transactions, connect to e2open, run analysis |
 | **Results** | View and edit transaction-level analysis output |
 | **Opportunities** | Identify duty overpayment opportunities and create initiatives |
 | **Initiatives** | Track duty optimization initiatives (PRE/POST analysis) |
@@ -45,12 +45,12 @@ Optional columns: `Weight`, `CV Currency`, `DP Currency`, `Status`, `Comment`.
 
 If a column named `Analyzed` is present, rows where `Analyzed = True` are automatically skipped.
 
-### Step 2: Connect to E2Open
+### Step 2: Connect to e2open
 
-In the Process tab, click the **Connect to E2Open** form and enter:
+In the Process tab, click the **Connect to e2open** form and enter:
 - **Environment** — `UAT` (testing) or `PRO` (production)
-- **User ID** — your E2Open user UUID
-- **Password** — your E2Open password
+- **User ID** — your e2open user UUID
+- **Password** — your e2open password
 - **Tenant ID** — your organization's tenant UUID
 - **Account Name** — a short label shown in the header (saved for future sessions)
 
@@ -60,13 +60,13 @@ Credentials are stored only in the active session and never written to disk.
 
 - Upload the Excel file using the file uploader
 - Confirm the sheet name (default: `Transactions`)
-- Set the **Reference Date** — the date used when querying E2Open duty rates
+- Set the **Reference Date** — the date used when querying e2open duty rates
 
 ### Step 4: Run the analysis
 
 Click **▶ Run**. The app will:
 1. Validate and clean the input data
-2. Open an E2Open session
+2. Open an e2open session
 3. Query duty rates for each transaction row
 4. Save results to the local database
 5. Navigate automatically to the Results tab
@@ -78,7 +78,7 @@ Click **▶ Run**. The app will:
 ### Pre-run summary
 
 After uploading a file, the app shows two KPI cards:
-- **Candidate rows** — number of rows that will be sent to E2Open
+- **Candidate rows** — number of rows that will be sent to e2open
 - **Data quality** — percentage of rows with valid HS codes (≥6 digits) and ISO-2 country codes
 
 Rows with blank COO, COI, HS Code, or zero Customs Value are separated into **Missing rows** (shown in a collapsible expander). These rows are excluded from the API run but are counted in the final summary.
@@ -87,7 +87,7 @@ Rows with blank COO, COI, HS Code, or zero Customs Value are separated into **Mi
 
 ### Duplicate detection
 
-Before starting, the app checks whether any transactions in the uploaded file were already sent to E2Open with the same reference date. If duplicates are found:
+Before starting, the app checks whether any transactions in the uploaded file were already sent to e2open with the same reference date. If duplicates are found:
 
 - **Skip duplicates** — sends only new rows (recommended)
 - **Reprocess all** — re-sends all rows including duplicates
@@ -100,8 +100,8 @@ During execution, a progress bar and status log track each row. Click **✕ Canc
 ### Post-run summary
 
 After completion, four KPI cards show:
-- **Processed OK** — rows successfully returned by E2Open
-- **Failed** — rows that returned an error from E2Open
+- **Processed OK** — rows successfully returned by e2open
+- **Failed** — rows that returned an error from e2open
 - **Missing** — rows skipped due to incomplete data
 - **Total** — all rows from the original file
 
@@ -119,7 +119,7 @@ The **Top 10 Countries** table below the map ranks countries by the selected met
 
 ## Results Tab
 
-Displays all transactions returned from E2Open, merged with the original input data.
+Displays all transactions returned from e2open, merged with the original input data.
 
 ### KPI cards
 
@@ -146,7 +146,7 @@ The table shows all transaction fields. Key columns:
 |---|---|
 | COO / COI | Country of Origin / Import |
 | HS Code | Tariff classification code |
-| Min Duty Program | Best applicable duty program from E2Open |
+| Min Duty Program | Best applicable duty program from e2open |
 | Min Duty Rate | Rate under the minimum duty program (%) |
 | Minimum Duties | What should be paid under the best program (EUR) |
 | Default Duty Program | Standard MFN duty program |
@@ -171,7 +171,7 @@ The `_db_id` column links each row to the database record — do not modify it.
 
 ### Drill-down from Opportunities
 
-Clicking **Show Details** in the Opportunities tab opens the Results tab filtered to the selected trade lanes (COO + COI + HS Code). A **Clear** button resets to the full dataset.
+Selecting rows in the Opportunities table expands an inline **Transaction Details** section directly below, showing the individual transactions that make up each grouped trade lane (COO + COI + HS Code).
 
 ---
 
@@ -223,9 +223,9 @@ Rows with existing initiatives are **hidden by default**. Check **Show rows with
 
 If some selected rows already have initiatives, the app warns before creating duplicates.
 
-### Show Details (drill-down)
+### Transaction Details (inline drill-down)
 
-Select rows and click **Show Details** to navigate to the Results tab filtered to those specific trade lanes.
+Select one or more rows to expand an inline **Transaction Details** section below the table, showing the individual transactions for each selected trade lane.
 
 ---
 
@@ -346,7 +346,7 @@ Each row represents one analysis run:
 |---|---|
 | ref_date | Reference date used for the API query |
 | started_at | Timestamp when the run started |
-| total_candidates | Rows submitted to E2Open |
+| total_candidates | Rows submitted to e2open |
 | total_ok | Rows returned successfully |
 | total_failed | Rows that returned API errors |
 | total_missing | Rows skipped (incomplete data) |
@@ -429,7 +429,7 @@ At the bottom of the sidebar:
 
 ### Logout
 
-Click **Logout** at the bottom of the sidebar to disconnect your E2Open session. All analysis data in the database is preserved — only the active session credentials are cleared.
+Click **Logout** at the bottom of the sidebar to disconnect your e2open session. All analysis data in the database is preserved — only the active session credentials are cleared.
 
 ---
 
@@ -445,10 +445,10 @@ The 2-letter ISO code of the **destination country** where goods are being impor
 A standardized international code used to classify traded goods (e.g. `8471.30` for laptops). The code determines which tariff schedule applies for a given COO→COI pair. Codes with fewer than 6 digits may produce inaccurate duty lookups — 6 or more digits are recommended.
 
 ### Reference Date
-The date passed to E2Open when querying duty rates. Tariff schedules change over time, so different reference dates may return different rates. Always set the reference date to the period you are analyzing.
+The date passed to e2open when querying duty rates. Tariff schedules change over time, so different reference dates may return different rates. Always set the reference date to the period you are analyzing.
 
 ### Min Duty Program
-The duty program identified by E2Open that results in the **lowest applicable duty rate** for a given COO→COI→HS combination. This is the program your company should be using. Overpayment occurs when the rate actually paid exceeds this minimum.
+The duty program identified by e2open that results in the **lowest applicable duty rate** for a given COO→COI→HS combination. This is the program your company should be using. Overpayment occurs when the rate actually paid exceeds this minimum.
 
 ### Default Duty Program (MFN)
 The **Most Favored Nation** rate — the standard tariff applied when no preferential trade agreement is in force. This is the baseline rate before any FTA or special program is considered.
@@ -465,7 +465,7 @@ The difference between duties actually paid and the minimum applicable duties: `
 ### Trade Lane
 A unique combination of **COO + COI + HS Code** (optionally + Material Number). Trade lanes are the unit of analysis for opportunities and initiatives.
 
-### E2Open Environment
+### e2open Environment
 - **UAT** — User Acceptance Testing environment. Safe for testing and development; does not affect production data.
 - **PRO** — Production environment. Use for live analysis with real transaction data.
 
@@ -485,7 +485,7 @@ Before running the analysis, the app validates:
 - **COO/COI format** — must be 2-letter ISO codes. Accepted aliases: `UK` → `GB`, `EL` → `GR`.
 - **HS Code format** — digits only; 6+ digits recommended for accurate lookups.
 - **Customs Value** — must be a positive number. Zero or blank values cause rows to be excluded.
-- **Missing rows** — rows with any blank key field (COO, COI, HS Code) are separated and not sent to E2Open.
+- **Missing rows** — rows with any blank key field (COO, COI, HS Code) are separated and not sent to e2open.
 
 A warning is shown if fewer than 95% of rows pass the HS Code or ISO format checks.
 
@@ -503,13 +503,13 @@ All rows in the Excel file either have `Analyzed = True` or are missing required
 Missing rows have at least one blank key field (COO, COI, HS Code) or a zero/blank Customs Value. Review the source data for those rows.
 
 ### Results show high Failed count
-E2Open returned errors for those rows. Common causes: invalid COO/COI code, HS code not found in E2Open's tariff database, or API rate limits. Check the Logs tab for specific error messages.
+e2open returned errors for those rows. Common causes: invalid COO/COI code, HS code not found in e2open's tariff database, or API rate limits. Check the Logs tab for specific error messages.
 
 ### Charts or KPIs show no data
 Sidebar filters may be excluding all data. Click **Reset Filter** in the sidebar to clear all active filters.
 
 ### "Restore" fails
-The uploaded file must be a valid `.db` file created by the Duty Analyzer backup function. Files from other SQLite databases are rejected.
+The uploaded file must be a valid `.db` file created by the Duty Optimizer backup function. Files from other SQLite databases are rejected.
 
 ### Map shows no countries
 COO/COI codes must be 2-letter ISO format. The map converts them to ISO-3 internally. Unrecognized codes are silently excluded from the map. Check the Results tab for rows with unusual country codes.

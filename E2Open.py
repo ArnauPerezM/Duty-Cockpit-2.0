@@ -47,6 +47,56 @@ class E2OpenSession(requests.Session):
         self.output = {}
         self.getToken()
 
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_json(response):
+        """Return (data: dict, error: str|None). Never raises."""
+        try:
+            data = response.json()
+        except Exception as exc:
+            return {}, f"Invalid JSON response: {exc}"
+        if not isinstance(data, dict):
+            return {}, "Invalid JSON response: root is not an object."
+        return data, None
+
+    @staticmethod
+    def _as_list(value):
+        """None / '' / [] → []; list → value; anything else → [value]."""
+        if value is None or value == "" or value == []:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _has_valid_rate_prog_result(self, output):
+        """Return True if any rateProgResult entry has usable data."""
+        try:
+            for line in self._as_list(output.get("line")):
+                if not isinstance(line, dict):
+                    continue
+                for rp in self._as_list(line.get("rateProgram")):
+                    if isinstance(rp, dict) and rp.get("rateProgResult"):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _extract_pd_alternative_hs(self, output, fallback_hs):
+        """Extract lowValueHS from partialDuty output, or return fallback_hs."""
+        try:
+            for item in self._as_list(output.get("rateProgResult")):
+                if not isinstance(item, dict):
+                    continue
+                for sub in self._as_list(item.get("rateProgResult")):
+                    if isinstance(sub, dict) and sub.get("lowValueHS"):
+                        return sub["lowValueHS"]
+        except Exception:
+            pass
+        return fallback_hs
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+
     def getToken(self):
         url = self._urls["token"]
         params = {
@@ -90,6 +140,8 @@ class E2OpenSession(requests.Session):
                     time.sleep(2 ** attempt)
                     continue
                 raise
+
+    # ── API calls ─────────────────────────────────────────────────────────────
 
     def getICCv1(self, coo, coi, hs, custUnitP, cur, qnty, ref_date):
         url = self._urls["icc_v1"] + self.tenant
@@ -173,11 +225,13 @@ class E2OpenSession(requests.Session):
         }
         return self._post_with_retry(url, request_body)
 
+    # ── Storage ───────────────────────────────────────────────────────────────
+
     def getFromStorage(self):
         return self.output
 
-    def putInStorage(self, coo, coi, hs, custUnitP, cur, qnty, ref_date, status, comment, response):
-        dct = {
+    def putInStorage(self, coo, coi, hs, custUnitP, cur, qnty, ref_date, status, comment, response, tx_id=None):
+        base = {
             "coo": coo,
             "coi": coi,
             "hs": hs,
@@ -188,78 +242,128 @@ class E2OpenSession(requests.Session):
             "status": status,
             "comment": comment,
         }
-        if not (status == 200):
-            idx = len(self.output)
-            self.output.update({idx: dct})
-            return
-        for line in response.get("line", []):
-            for rate_prog in line.get("rateProgram", []):
-                rate_prog_result = rate_prog.get("rateProgResult", [])
-                if rate_prog_result == "" or rate_prog_result == []:
-                    idx = len(self.output)
-                    self.output.update({idx: dct})
-                    return
-        for line in response["line"]:
-            for prog in line["rateProgram"]:
-                progName = prog["rateProgName"]
-                progRates = prog["rateProgResult"]
-                for tax in progRates:
-                    dctProg = {**dct, **{"Program": progName}, **tax}
-                    idx = len(self.output)
-                    self.output.update({idx: dctProg})
+        if tx_id is not None:
+            base["_tx_id"] = str(tx_id)
 
-    def getImportCost(self, coo, coi, hs, custUnitP, cur, qnty, ref_date):
+        # Preserve HS alternative when caller embeds it in the response dict
+        if isinstance(response, dict) and response.get("hsNum"):
+            base["hsNum"] = response.get("hsNum")
+
+        def _store(row):
+            self.output[len(self.output)] = row
+
+        if status != 200:
+            if not isinstance(response, dict) and response not in (None, ""):
+                base["response_text"] = str(response)[:500]
+            _store(base)
+            return
+
+        if not isinstance(response, dict):
+            if response not in (None, ""):
+                base["response_text"] = str(response)[:500]
+            _store(base)
+            return
+
+        lines = self._as_list(response.get("line"))
+        if not lines:
+            _store(base)
+            return
+
+        stored_tax_rows = 0
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            for prog in self._as_list(line.get("rateProgram")):
+                if not isinstance(prog, dict):
+                    continue
+                prog_name = prog.get("rateProgName", "")
+                for tax in self._as_list(prog.get("rateProgResult")):
+                    if not isinstance(tax, dict) or not tax:
+                        continue
+                    _store({**base, "Program": prog_name, **tax})
+                    stored_tax_rows += 1
+
+        if stored_tax_rows == 0:
+            _store(base)
+
+    # ── Main cost query ───────────────────────────────────────────────────────
+
+    def getImportCost(self, coo, coi, hs, custUnitP, cur, qnty, ref_date, tx_id=None):
+        # ── A) Full HS ──────────────────────────────────────────────────────
         response = self.getICCv1(coo, coi, hs, custUnitP, cur, qnty, ref_date)
 
         if response.status_code != 200:
             comment = "Error."
-            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date, response.status_code, comment, response.text)
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              response.status_code, comment, response.text, tx_id=tx_id)
             return coo, coi, hs, custUnitP, cur, qnty, response.status_code, comment
 
-        output = response.json()
+        output, json_error = self._safe_json(response)
+        if json_error:
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              "INVALID_JSON", json_error, response.text, tx_id=tx_id)
+            return coo, coi, hs, custUnitP, cur, qnty, "INVALID_JSON", json_error
 
-        def has_valid_rateProgResult(output):
-            try:
-                for line in output.get("line", []):
-                    for rp in line.get("rateProgram", []):
-                        if rp.get("rateProgResult"):
-                            return True
-                return False
-            except Exception:
-                return False
-
-        if has_valid_rateProgResult(output):
+        if self._has_valid_rate_prog_result(output):
             comment = "No issues."
-            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date, response.status_code, comment, output)
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              response.status_code, comment, output, tx_id=tx_id)
             return coo, coi, hs, custUnitP, cur, qnty, response.status_code, comment
 
+        # ── B) Partial HS loop ──────────────────────────────────────────────
         for i in range(len(hs) - 1, 5, -1):
-            response = self.getICCv1(coo, coi, hs[:i], custUnitP, cur, qnty, ref_date)
-            output = response.json()
-            if has_valid_rateProgResult(output):
+            partial_resp = self.getICCv1(coo, coi, hs[:i], custUnitP, cur, qnty, ref_date)
+            if partial_resp.status_code != 200:
+                _logger.warning("Partial HS %s returned HTTP %d — skipping.", hs[:i], partial_resp.status_code)
+                continue
+            partial_output, json_error = self._safe_json(partial_resp)
+            if json_error:
+                _logger.warning("Partial HS %s: %s — skipping.", hs[:i], json_error)
+                continue
+            if self._has_valid_rate_prog_result(partial_output):
                 comment = "Partial HS match."
-                self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date, response.status_code, comment, output)
-                return coo, coi, hs, custUnitP, cur, qnty, response.status_code, comment
+                self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                                  partial_resp.status_code, comment, partial_output, tx_id=tx_id)
+                return coo, coi, hs, custUnitP, cur, qnty, partial_resp.status_code, comment
 
-        response = self.getPDv1(coo, coi, hs, "N", ref_date)
-        output = response.json()
-        if not (output["rateProgResult"] == []):
+        # ── C) Partial Duty fallback ────────────────────────────────────────
+        pd_response = self.getPDv1(coo, coi, hs, "N", ref_date)
+
+        if pd_response.status_code != 200:
+            comment = "Partial duty fallback failed."
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              pd_response.status_code, comment, pd_response.text, tx_id=tx_id)
+            return coo, coi, hs, custUnitP, cur, qnty, pd_response.status_code, comment
+
+        pd_output, json_error = self._safe_json(pd_response)
+        if json_error:
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              "INVALID_JSON", json_error, pd_response.text, tx_id=tx_id)
+            return coo, coi, hs, custUnitP, cur, qnty, "INVALID_JSON", json_error
+
+        if self._as_list(pd_output.get("rateProgResult")):
             comment = "E2Open-provided alternative."
-            used_coo = coo
-            used_coi = coi
-            try:
-                used_hs = output["rateProgResult"][0]["rateProgResult"][0]["lowValueHS"]
-            except (IndexError, KeyError):
-                used_hs = hs
-            icc_response = self.getICCv1(used_coo, used_coi, used_hs, custUnitP, cur, qnty, ref_date)
-            icc_data = icc_response.json()
+            used_hs = self._extract_pd_alternative_hs(pd_output, hs)
+            icc_response = self.getICCv1(coo, coi, used_hs, custUnitP, cur, qnty, ref_date)
+            if icc_response.status_code != 200:
+                self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                                  icc_response.status_code, comment, icc_response.text, tx_id=tx_id)
+                return coo, coi, hs, custUnitP, cur, qnty, icc_response.status_code, comment
+            icc_data, json_error = self._safe_json(icc_response)
+            if json_error:
+                self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                                  "INVALID_JSON", json_error, icc_response.text, tx_id=tx_id)
+                return coo, coi, hs, custUnitP, cur, qnty, "INVALID_JSON", json_error
             icc_data["hsNum"] = used_hs
-            self.putInStorage(used_coo, used_coi, hs, custUnitP, cur, qnty, ref_date, icc_response.status_code, comment, icc_data)
+            self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                              icc_response.status_code, comment, icc_data, tx_id=tx_id)
             return coo, coi, hs, custUnitP, cur, qnty, icc_response.status_code, comment
 
+        # ── D) No result ────────────────────────────────────────────────────
         comment = "No info can be found."
-        self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date, response.status_code, comment, output)
-        return coo, coi, hs, custUnitP, cur, qnty, response.status_code, comment
+        self.putInStorage(coo, coi, hs, custUnitP, cur, qnty, ref_date,
+                          pd_response.status_code, comment, pd_output, tx_id=tx_id)
+        return coo, coi, hs, custUnitP, cur, qnty, pd_response.status_code, comment
 
 
 if __name__ == "__main__":

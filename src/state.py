@@ -17,7 +17,6 @@ DEFAULT_STATE: dict[str, Any] = {
     # Run lifecycle
     "run_state": "ready",
     "last_run_id": 0,
-    "cancel_requested": False,
     "logs": [],
     "df_clean": None,
     "df_missing": None,
@@ -27,6 +26,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "run_summary": None,
     # Duplicate-check flow
     "dup_rows": None,
+    "dup_check_error": None,
+    # Executed subset (may differ from df_clean when duplicates are skipped)
+    "df_executed": None,
+    # DB save error (set when API succeeded but DB persistence failed)
+    "db_save_error": None,
     # DB editor flow
     "db_edit_mode": "view",
     "db_editor_base_df": None,
@@ -39,10 +43,10 @@ DEFAULT_STATE: dict[str, Any] = {
     # Sidebar filters
     "sf_date_from": None,
     "sf_date_to": None,
-    "sf_coo": "All",
-    "sf_coi": "All",
-    "sf_hs": "All",
-    "sf_material": "All",
+    "sf_coo": [],
+    "sf_coi": [],
+    "sf_hs": [],
+    "sf_material": [],
 }
 
 

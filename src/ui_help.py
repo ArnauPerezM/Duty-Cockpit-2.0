@@ -1,21 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from pathlib import Path
 import streamlit as st
-
-# ---------------------------------------------------------------------------
-# Load the User Guide once at import time (cached as module-level constant).
-# ---------------------------------------------------------------------------
-_GUIDE_PATH = Path(__file__).resolve().parent.parent / "USER_GUIDE.md"
-
-def _load_guide() -> str:
-    try:
-        return _GUIDE_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
-
-_GUIDE_TEXT = _load_guide()
-
 
 # ---------------------------------------------------------------------------
 # Knowledge base: (keywords, section_key) pairs pointing to answer blocks.
@@ -30,11 +15,11 @@ _ANSWERS: dict[str, str] = {
         "**Getting Started — First Run**\n\n"
         "1. **Prepare the Excel file** — sheet named *Transactions* with columns: "
         "Invoice Number, Material Number, COO, COI, HS Code, Customs Value, Duty Paid.\n"
-        "2. **Connect to E2Open** — click *Connect to E2Open* in the Process tab and enter "
+        "2. **Connect to e2open** — click *Connect to e2open* in the Process tab and enter "
         "your User ID, Password, Tenant ID, Environment (UAT/PRO), and an Account Name.\n"
         "3. **Upload the file** — drag or browse to your Excel file in the Process tab.\n"
-        "4. **Set the Reference Date** — the date used to query E2Open duty rates.\n"
-        "5. **Click ▶ Run** — the app queries E2Open row by row, saves results to the "
+        "4. **Set the Reference Date** — the date used to query e2open duty rates.\n"
+        "5. **Click ▶ Run** — the app queries e2open row by row, saves results to the "
         "local database, and navigates to the Results tab automatically."
     ),
 
@@ -56,13 +41,13 @@ _ANSWERS: dict[str, str] = {
         "If an `Analyzed` column exists, rows where `Analyzed = True` are automatically skipped."
     ),
 
-    # ── E2Open credentials ───────────────────────────────────────────────────
+    # ── e2open credentials ───────────────────────────────────────────────────
     "credentials": (
-        "**E2Open Credentials**\n\n"
-        "Fill in the *Connect to E2Open* form in the Process tab:\n\n"
+        "**e2open Credentials**\n\n"
+        "Fill in the *Connect to e2open* form in the Process tab:\n\n"
         "- **Environment** — `UAT` for testing, `PRO` for production\n"
-        "- **User ID** — your E2Open user UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)\n"
-        "- **Password** — your E2Open password\n"
+        "- **User ID** — your e2open user UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)\n"
+        "- **Password** — your e2open password\n"
         "- **Tenant ID** — your organization's tenant UUID\n"
         "- **Account Name** — a short label shown in the header; saved for future sessions\n\n"
         "Credentials are stored only in the active session and **never written to disk**."
@@ -75,14 +60,14 @@ _ANSWERS: dict[str, str] = {
         "Use this when validating a new file format or testing the workflow.\n"
         "- **PRO** (Production) — live environment with real tariff data. "
         "Use for official duty analysis on production transactions.\n\n"
-        "Switch environment in the *Connect to E2Open* form. "
+        "Switch environment in the *Connect to e2open* form. "
         "The active environment is shown as a chip below the account name in the header."
     ),
 
     # ── Reference date ───────────────────────────────────────────────────────
     "refdate": (
         "**Reference Date**\n\n"
-        "The date sent to E2Open when querying duty rates. "
+        "The date sent to e2open when querying duty rates. "
         "Tariff schedules change over time — different dates may return different rates.\n\n"
         "Always set the reference date to **the period you are analyzing** "
         "(e.g. the invoice date or the end of the period under review). "
@@ -97,7 +82,7 @@ _ANSWERS: dict[str, str] = {
         "**Missing rows** (incomplete data, skipped)\n"
         "2. Data quality KPIs warn if fewer than 95% of rows have valid HS codes "
         "or ISO-2 country codes\n"
-        "3. Connect to E2Open and click **▶ Run**\n"
+        "3. Connect to e2open and click **▶ Run**\n"
         "4. A progress bar and live status log track each row\n"
         "5. After completion: 4 KPI cards show OK / Failed / Missing / Total counts\n\n"
         "**Map view** (post-run): a choropleth map with 4 selectable metrics — "
@@ -108,7 +93,7 @@ _ANSWERS: dict[str, str] = {
     # ── Duplicate detection ──────────────────────────────────────────────────
     "duplicate": (
         "**Duplicate Transaction Detection**\n\n"
-        "Before running, the app checks if any rows were already sent to E2Open "
+        "Before running, the app checks if any rows were already sent to e2open "
         "with the same reference date. If duplicates are found, you choose:\n\n"
         "- **Skip duplicates** — sends only the new rows (recommended)\n"
         "- **Reprocess all** — re-sends all rows including duplicates\n"
@@ -132,14 +117,14 @@ _ANSWERS: dict[str, str] = {
         "- Blank COO, COI, or HS Code\n"
         "- Zero or blank Customs Value\n\n"
         "Missing rows are shown in a collapsible expander before the run. "
-        "They are counted in the post-run summary but not sent to E2Open. "
+        "They are counted in the post-run summary but not sent to e2open. "
         "Fix the source data and re-run to include them."
     ),
 
     # ── Results tab ─────────────────────────────────────────────────────────
     "results": (
         "**Results Tab**\n\n"
-        "Shows all transactions returned from E2Open, merged with the original input. "
+        "Shows all transactions returned from e2open, merged with the original input. "
         "KPI cards: Transactions, Countries of Import, Countries of Origin, "
         "Customs Value, Duty Exposure, Duty Paid.\n\n"
         "**Charts:**\n"
@@ -184,7 +169,7 @@ _ANSWERS: dict[str, str] = {
         "Four bar charts show overpayments by Product, by COI, by Trade Lane, and by Duty Program.\n\n"
         "**Actions:**\n"
         "- Select rows → **Create Initiative** to track the opportunity\n"
-        "- Select rows → **Show Details** to drill down to the Results tab for those lanes\n\n"
+        "- Select rows → individual transactions for that trade lane expand inline below the table\n\n"
         "Rows with existing initiatives are hidden by default. "
         "Enable *Show rows with existing initiatives* to display them."
     ),
@@ -332,13 +317,13 @@ _ANSWERS: dict[str, str] = {
         "- **Restore** — upload a previously downloaded `.db` file to replace the current database.\n\n"
         "**A backup of the current database is saved automatically before any restore** "
         "so you can recover if the restore file is incorrect.\n\n"
-        "Only `.db` files created by Duty Analyzer are accepted."
+        "Only `.db` files created by Duty Optimizer are accepted."
     ),
 
     # ── Logout ───────────────────────────────────────────────────────────────
     "logout": (
         "**Logout**\n\n"
-        "Click **Logout** at the bottom of the sidebar to disconnect from E2Open. "
+        "Click **Logout** at the bottom of the sidebar to disconnect from e2open. "
         "Your analysis data in the database is fully preserved — "
         "only the active session credentials (User ID, Password, Tenant ID) are cleared. "
         "The account name chip disappears from the header until you reconnect."
@@ -359,7 +344,7 @@ _ANSWERS: dict[str, str] = {
         "**COI — Country of Import**\n\n"
         "The 2-letter ISO code of the **destination country** where goods are being imported "
         "(e.g. `ES` = Spain, `FR` = France, `GB` = United Kingdom).\n\n"
-        "Combined with COO and HS Code, COI determines the applicable duty rate in E2Open's "
+        "Combined with COO and HS Code, COI determines the applicable duty rate in e2open's "
         "tariff database. Must be a valid ISO-2 code."
     ),
 
@@ -368,7 +353,7 @@ _ANSWERS: dict[str, str] = {
         "**HS Code — Harmonized System**\n\n"
         "A standardized international code used to classify traded goods (e.g. `8471.30` for laptops). "
         "The code determines which tariff schedule and duty rate applies for a given COO→COI pair.\n\n"
-        "- Minimum **6 digits** recommended for accurate E2Open lookups\n"
+        "- Minimum **6 digits** recommended for accurate e2open lookups\n"
         "- Shorter codes may return inaccurate or no rates\n"
         "- The app warns if fewer than 95% of rows have 6+ digit HS codes\n"
         "- Only digits are kept (dots and spaces are stripped automatically)"
@@ -390,7 +375,7 @@ _ANSWERS: dict[str, str] = {
     # ── Min / Default duty programs ───────────────────────────────────────────
     "programs": (
         "**Duty Programs**\n\n"
-        "**Min Duty Program** — the program identified by E2Open with the **lowest applicable rate** "
+        "**Min Duty Program** — the program identified by e2open with the **lowest applicable rate** "
         "for a given trade lane. This is what your company should be using.\n\n"
         "**Default Duty Program (MFN)** — the Most Favored Nation rate, the standard tariff "
         "applied when no preferential trade agreement is in force. "
@@ -417,7 +402,7 @@ _ANSWERS: dict[str, str] = {
         "A trade lane is a unique combination of **COO + COI + HS Code** "
         "(optionally + Material Number). "
         "It is the core unit of analysis in the Opportunities and Initiatives tabs.\n\n"
-        "Each trade lane has one minimum duty rate from E2Open. "
+        "Each trade lane has one minimum duty rate from e2open. "
         "Multiple invoices on the same lane are aggregated to measure total overpayment."
     ),
 
@@ -468,11 +453,11 @@ _ANSWERS: dict[str, str] = {
         "environment. UUID format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.\n\n"
         "**No candidate rows** — All rows have `Analyzed = True` or missing required fields. "
         "Check sheet name and that COO, COI, HS Code, Customs Value are populated.\n\n"
-        "**High Failed count** — E2Open returned errors. Check the Logs tab for details. "
-        "Common causes: invalid country code, HS code not in E2Open's tariff database.\n\n"
+        "**High Failed count** — e2open returned errors. Check the Logs tab for details. "
+        "Common causes: invalid country code, HS code not in e2open's tariff database.\n\n"
         "**Charts show no data** — Sidebar filters may exclude everything. "
         "Click **Reset Filter**.\n\n"
-        "**Restore fails** — Only `.db` files created by Duty Analyzer are accepted.\n\n"
+        "**Restore fails** — Only `.db` files created by Duty Optimizer are accepted.\n\n"
         "**Map shows no countries** — COO/COI codes must be valid ISO-2 format."
     ),
 
@@ -547,7 +532,7 @@ _FALLBACK = (
     "I'm not sure about that. Try asking about:\n\n"
     "- *Getting started / first run*\n"
     "- *Excel file format and required columns*\n"
-    "- *E2Open credentials (User ID, Password, Tenant)*\n"
+    "- *e2open credentials (User ID, Password, Tenant)*\n"
     "- *COO, COI, HS Code, or FTA concepts*\n"
     "- *Overpaid duties and opportunities*\n"
     "- *Initiatives (PRE/POST comparison table, status, groups, End Date)*\n"
@@ -558,8 +543,8 @@ _FALLBACK = (
 )
 
 _WELCOME = (
-    "Hi! I can answer questions about how **Duty Analyzer** works.\n\n"
-    "Ask me about: *getting started, Excel format, E2Open credentials, "
+    "Hi! I can answer questions about how **Duty Optimizer** works.\n\n"
+    "Ask me about: *getting started, Excel format, e2open credentials, "
     "COO/COI/HS Code, FTA, overpaid duties, opportunities, initiatives, "
     "PRE/POST comparison, Savings Capture Rate, End Date, "
     "Reporting charts (World Map, Heat Map, Monthly Trend), "
@@ -575,7 +560,7 @@ def _match(question: str) -> str:
     return _FALLBACK
 
 
-@st.dialog("Duty Analyzer — Help", width="large")
+@st.dialog("Duty Optimizer — Help", width="large")
 def render_help_dialog() -> None:
     if "help_chat" not in st.session_state:
         st.session_state.help_chat = [{"role": "assistant", "content": _WELCOME}]
@@ -586,7 +571,7 @@ def render_help_dialog() -> None:
 
     col_input, col_clear = st.columns([8, 1], vertical_alignment="bottom")
     with col_input:
-        prompt = st.chat_input("Ask a question about Duty Analyzer…")
+        prompt = st.chat_input("Ask a question about Duty Optimizer…")
     with col_clear:
         if st.button("Clear", key="help_clear_chat", width="stretch"):
             st.session_state.help_chat = [{"role": "assistant", "content": _WELCOME}]

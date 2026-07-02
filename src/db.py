@@ -25,6 +25,7 @@ def get_db_path() -> Path:
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(get_db_path())
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -200,6 +201,13 @@ CREATE TABLE IF NOT EXISTS fx_rates_cache (
 
 _FX_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
 
+_INDEXES_DDL = """
+CREATE INDEX IF NOT EXISTS idx_merged_run_id    ON merged_results (run_id);
+CREATE INDEX IF NOT EXISTS idx_merged_coo_coi   ON merged_results (coo, coi, hs_code);
+CREATE INDEX IF NOT EXISTS idx_merged_ref_date  ON merged_results (ref_date);
+CREATE INDEX IF NOT EXISTS idx_initiatives_status ON initiatives (status);
+"""
+
 _DB_READY = False  # module-level flag: schema created + migrations run
 
 
@@ -215,6 +223,7 @@ def init_db() -> None:
         _migrate_runs(conn)
         _migrate_merged(conn)
         _migrate_initiatives(conn)
+        conn.executescript(_INDEXES_DDL)
     _DB_READY = True
 
 
@@ -392,10 +401,9 @@ def delete_merged_rows(ids: list) -> int:
 
 def find_duplicate_transactions(df: pd.DataFrame, ref_date: str = "") -> pd.DataFrame:
     """
-    Return the subset of rows in `df` that already exist in merged_results.
-
-    No ref_date filter — the same transaction should not be re-sent regardless of
-    which accounting period it was originally processed under.
+    Return the subset of rows in `df` that already exist in merged_results,
+    regardless of ref_date.  A transaction is a duplicate if it was ever sent
+    to e2open — different accounting periods are still flagged.
 
     Match strategy (in order of reliability):
     1. invoice_number + material_number + customs_value_original + cv_currency_original

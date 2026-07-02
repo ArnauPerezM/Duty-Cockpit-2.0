@@ -4,15 +4,9 @@ from typing import Any, Optional
 
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from src.ui_shared import (
-    ACCENTURE_PURPLE_CORE,
-    ACCENTURE_PURPLE_DARK,
-    ACCENTURE_PURPLE_DARKEST,
-    ACCENTURE_PURPLE_LIGHT,
-    ACCENTURE_PURPLE_LIGHTEST,
     _apply_sidebar_filters,
     _fmt_int,
     _fmt_num,
@@ -42,7 +36,7 @@ _EDITOR_READONLY_COLS = [
 _EDITOR_HIDDEN_COLS = ["run_id", "ref_date", "saved_at"]
 
 
-def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
+def render_tab_results(df_merged: Optional[pd.DataFrame]) -> None:
     if df_merged is None or df_merged.empty:
         _render_empty_state("No results yet", "📊", "Run the analysis to populate this tab.")
         return
@@ -52,44 +46,7 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    # ── Drill-down from Opportunities (multi-value override) ─────────────────
-    coo_opts = sorted(df["coo"].dropna().unique().tolist()) if "coo" in df.columns else []
-    coi_opts = sorted(df["coi"].dropna().unique().tolist()) if "coi" in df.columns else []
-    hs_opts  = sorted(df["hs code"].dropna().unique().tolist()) if "hs code" in df.columns else []
-
-    if "opp_drill_results" in st.session_state:
-        _dr = st.session_state.pop("opp_drill_results")
-        st.session_state["res_coo"] = [v for v in _dr.get("coo", []) if v in coo_opts]
-        st.session_state["res_coi"] = [v for v in _dr.get("coi", []) if v in coi_opts]
-        st.session_state["res_hs"]  = [v for v in _dr.get("hs",  []) if v in hs_opts]
-
-    _drill_coo = st.session_state.get("res_coo", [])
-    _drill_coi = st.session_state.get("res_coi", [])
-    _drill_hs  = st.session_state.get("res_hs",  [])
-    _drill_active = bool(_drill_coo or _drill_coi or _drill_hs)
-
-    if _drill_active:
-        _dc1, _dc2 = st.columns([9, 1])
-        with _dc1:
-            st.info(
-                f"Drill-down from **Opportunities** active — "
-                f"{len(_drill_coo)} COO · {len(_drill_coi)} COI · {len(_drill_hs)} HS Code",
-                icon="🔍",
-            )
-        with _dc2:
-            if st.button("Clear", key="res_clear_drill", width='stretch'):
-                for _k in ["res_coo", "res_coi", "res_hs"]:
-                    st.session_state.pop(_k, None)
-                st.rerun()
-        if _drill_coo and "coo" in df.columns:
-            df = df[df["coo"].isin(_drill_coo)]
-        if _drill_coi and "coi" in df.columns:
-            df = df[df["coi"].isin(_drill_coi)]
-        if _drill_hs and "hs code" in df.columns:
-            df = df[df["hs code"].isin(_drill_hs)]
-    else:
-        # Apply global sidebar filters
-        df = _apply_sidebar_filters(df)
+    df = _apply_sidebar_filters(df)
 
     # ── Numerics ──────────────────────────────────────────────────────────────
     def _n(col):
@@ -111,103 +68,6 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
         {"label": "Duty Exposure",  "value": f"{_fmt_num(def_s)} €",     "sub": "Sum of default duties"},
         {"label": "Duty Paid",      "value": f"{_fmt_num(paid_s)} €",    "sub": "Total duties paid"},
     ])
-
-    st.markdown("")
-
-    # ── Shared chart layout ────────────────────────────────────────────────
-    _CL = dict(
-        paper_bgcolor="rgba(255,255,255,0.06)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=8, t=32, b=0),
-        font=dict(color="rgba(255,255,255,0.82)", size=13),
-    )
-    _AXIS = dict(
-        gridcolor="rgba(255,255,255,0.07)", tickfont=dict(size=12),
-        showline=True, linecolor="rgba(255,255,255,0.25)", linewidth=1,
-    )
-    _PURPLES = [
-        ACCENTURE_PURPLE_CORE, ACCENTURE_PURPLE_LIGHT, ACCENTURE_PURPLE_DARK,
-        ACCENTURE_PURPLE_LIGHTEST, ACCENTURE_PURPLE_DARKEST,
-        "#C2A3FF", "#7500C0", "#E6DCFF",
-    ]
-
-    # ── Row 2: Pie · Gauge · Pie ───────────────────────────────────────────
-    _ch1, _ch2, _ch3 = st.columns(3)
-
-    with _ch1:
-        st.markdown("**Customs Value by COI**")
-        if "coi" in df.columns and customs_s > 0:
-            _grp = (
-                df.groupby("coi")["customs value"]
-                .apply(lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
-                .reset_index()
-                .rename(columns={"customs value": "val"})
-            )
-            _grp = _grp[_grp["val"] > 0].nlargest(8, "val")
-            _fig = px.pie(_grp, values="val", names="coi",
-                          color_discrete_sequence=_PURPLES, template="plotly_dark")
-            _fig.update_layout(height=240, **_CL, showlegend=True,
-                               legend=dict(font=dict(size=12), bgcolor="rgba(0,0,0,0)"))
-            _fig.update_traces(
-                textinfo="percent", textfont_size=13,
-                hovertemplate="<b>%{label}</b><br>%{value:,.0f} €<br>%{percent:.1%}<extra></extra>",
-            )
-            _render_plotly(_fig, label="Customs Value by COI")
-        else:
-            st.info("No customs value data.")
-
-    with _ch2:
-        st.markdown("**Duty Exposure**")
-        _gauge_max = max(def_s, paid_s * 1.1, 1.0)
-        _fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=paid_s,
-            gauge={
-                "axis": {
-                    "range": [0, _gauge_max],
-                    "tickformat": ".2s", "ticksuffix": " €",
-                    "tickfont": {"size": 12, "color": "rgba(255,255,255,0.65)"},
-                },
-                "bar": {"color": "#40E0D0", "thickness": 0.55},
-                "bgcolor": "rgba(255,255,255,0.07)",
-                "borderwidth": 0,
-                "steps": [{"range": [0, _gauge_max], "color": "rgba(255,255,255,0.07)"}],
-                **({"threshold": {
-                    "line": {"color": "#FFD700", "width": 3},
-                    "thickness": 0.75,
-                    "value": min_s,
-                }} if min_s > 0 else {}),
-            },
-            number={"suffix": " €", "valueformat": ",.0f",
-                    "font": {"size": 26, "color": "white"}},
-        ))
-        _fig.update_layout(
-            height=240, paper_bgcolor="rgba(255,255,255,0.06)", plot_bgcolor="rgba(0,0,0,0)",
-            font={"color": "white"}, margin=dict(l=20, r=20, t=20, b=10),
-        )
-        _render_plotly(_fig, label="Duty Exposure gauge")
-        st.caption(f"Paid: {_fmt_num(paid_s)} € / Min: {_fmt_num(min_s)} € / Exposure: {_fmt_num(def_s)} €")
-
-    with _ch3:
-        st.markdown("**Duties Paid by COI**")
-        if "coi" in df.columns and paid_s > 0:
-            _grp = (
-                df.groupby("coi")["duty paid"]
-                .apply(lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
-                .reset_index()
-                .rename(columns={"duty paid": "val"})
-            )
-            _grp = _grp[_grp["val"] > 0].nlargest(8, "val")
-            _fig = px.pie(_grp, values="val", names="coi",
-                          color_discrete_sequence=_PURPLES, template="plotly_dark")
-            _fig.update_layout(height=240, **_CL, showlegend=True,
-                               legend=dict(font=dict(size=12), bgcolor="rgba(0,0,0,0)"))
-            _fig.update_traces(
-                textinfo="percent", textfont_size=13,
-                hovertemplate="<b>%{label}</b><br>%{value:,.0f} €<br>%{percent:.1%}<extra></extra>",
-            )
-            _render_plotly(_fig, label="Duties Paid by COI")
-        else:
-            st.info("No duty paid data.")
 
     # ── Results table ──────────────────────────────────────────────────────
     st.markdown("### Results table")
@@ -282,7 +142,39 @@ def render_tab_resultados(df_merged: Optional[pd.DataFrame]) -> None:
             }.items()
             if c in _df_res_disp.columns
         }
-        st.dataframe(_stripe(_df_res_disp), width='stretch', column_config=_res_col_cfg or None)
+        # ── Pagination ────────────────────────────────────────────────────
+        _total_rows = len(_df_res_disp)
+        _PAGE_SIZES = [50, 100, 250]
+        _pag_c1, _pag_c2, _pag_c3, _pag_c4 = st.columns([2, 4, 1, 1])
+        with _pag_c1:
+            _page_size = st.selectbox(
+                "Rows per page", _PAGE_SIZES, index=0,
+                key="res_page_size", label_visibility="visible",
+            )
+        _total_pages = max(1, (_total_rows + _page_size - 1) // _page_size)
+        _page = st.session_state.get("res_page", 0)
+        if _page >= _total_pages:
+            st.session_state.res_page = 0
+            _page = 0
+        _start = _page * _page_size
+        _end = min(_start + _page_size, _total_rows)
+        with _pag_c2:
+            st.markdown(
+                f"<div style='padding-top:28px;font-size:13px;color:rgba(255,255,255,0.55);'>"
+                f"Page {_page + 1}/{_total_pages} · {_start + 1:,}–{_end:,} of {_total_rows:,}</div>",
+                unsafe_allow_html=True,
+            )
+        with _pag_c3:
+            st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            if st.button("◀ Prev", key="res_prev_page", disabled=(_page == 0), width='stretch'):
+                st.session_state.res_page = _page - 1
+                st.rerun()
+        with _pag_c4:
+            st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            if st.button("Next ▶", key="res_next_page", disabled=(_page >= _total_pages - 1), width='stretch'):
+                st.session_state.res_page = _page + 1
+                st.rerun()
+        st.dataframe(_stripe(_df_res_disp.iloc[_start:_end]), width='stretch', column_config=_res_col_cfg or None)
     render_db_editor_section(df_merged=df_merged, df_filtered=df)
 
 

@@ -4,21 +4,13 @@ import html as _html
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from src.ui_shared import (
-    ACCENTURE_PURPLE_CORE,
-    ACCENTURE_PURPLE_DARK,
-    ACCENTURE_PURPLE_DARKEST,
-    ACCENTURE_PURPLE_LIGHT,
-    ACCENTURE_PURPLE_LIGHTEST,
     _fmt_num,
     _pre_fmt_num,
     _render_empty_state,
     _render_kpi_cards,
-    _render_plotly,
     _safe_str,
     _stripe,
     _strip_date_cols,
@@ -209,8 +201,8 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
         return
 
     # Apply sidebar COO/COI filter to initiatives (uses hs_code variant too)
-    _sf_coo = st.session_state.get("sf_coo", "All")
-    _sf_coi = st.session_state.get("sf_coi", "All")
+    _sf_coo = st.session_state.get("sf_coo", [])
+    _sf_coi = st.session_state.get("sf_coi", [])
     df = df_initiatives.copy()
 
     # Strip time component — keep only YYYY-MM-DD
@@ -301,100 +293,6 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
         {"label": "Reimbursements Realized",   "value": f"{_fmt_num(reimbursed)} €", "icon": "💰", "sub": "Sum of reimbursements realized"},
         {"label": "Total Savings Realized",    "value": f"{_fmt_num(total_realized)} €", "icon": "🏆", "sub": "FTA Realized + Reimbursements Realized"},
     ], compact=True)
-
-    st.markdown("")
-
-    # ── Charts ────────────────────────────────────────────────────────────────
-    _CL = dict(
-        paper_bgcolor="rgba(255,255,255,0.06)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=8, t=30, b=0), showlegend=False,
-        font=dict(color="rgba(255,255,255,0.80)", size=13),
-    )
-    _AXIS = dict(
-        gridcolor="rgba(255,255,255,0.07)", tickfont=dict(size=12),
-        showline=True, linecolor="rgba(255,255,255,0.25)", linewidth=1,
-    )
-
-    cch1, cch2 = st.columns(2)
-
-    # 1 — Initiative Portfolio by Status (donut)
-    with cch1:
-        st.markdown("**Initiative Portfolio by Status**")
-        if "status" in df.columns:
-            _st_cnt = df.groupby("status").size().reset_index(name="count")
-            _total_ini = int(_st_cnt["count"].sum())
-            if not _st_cnt.empty:
-                _color_map = {
-                    "Identified": ACCENTURE_PURPLE_LIGHTEST,
-                    "Validated":  ACCENTURE_PURPLE_LIGHT,
-                    "Completed":  ACCENTURE_PURPLE_CORE,
-                    "Discarded":  ACCENTURE_PURPLE_DARKEST,
-                }
-                _st_cnt["color"] = _st_cnt["status"].map(_color_map).fillna(ACCENTURE_PURPLE_DARK)
-                fig = go.Figure(go.Pie(
-                    labels=_st_cnt["status"],
-                    values=_st_cnt["count"],
-                    hole=0.62,
-                    marker=dict(
-                        colors=_st_cnt["color"].tolist(),
-                        line=dict(color="rgba(0,0,0,0.3)", width=2),
-                    ),
-                    textinfo="label+percent",
-                    textfont=dict(size=12),
-                    hovertemplate="<b>%{label}</b><br>%{value} initiatives (%{percent})<extra></extra>",
-                ))
-                _CL_donut = {k: v for k, v in _CL.items() if k != "showlegend"}
-                fig.update_layout(
-                    height=280,
-                    annotations=[dict(
-                        text=f"<b>{_total_ini}</b><br><span style='font-size:10px'>initiatives</span>",
-                        x=0.5, y=0.5, showarrow=False,
-                        font=dict(size=18, color="rgba(255,255,255,0.92)"),
-                        xanchor="center",
-                    )],
-                    showlegend=True,
-                    legend=dict(orientation="h", yanchor="bottom", y=-0.20,
-                                xanchor="center", x=0.5, font=dict(size=11),
-                                bgcolor="rgba(0,0,0,0)"),
-                    **_CL_donut,
-                )
-                _render_plotly(fig, label="Initiative Portfolio by Status")
-
-    # 2 — Top 10 Open Initiatives by country (Identified or Validated), sorted by count
-    with cch2:
-        st.markdown("**Top 10 Open Initiatives by Country of Import**")
-        if "status" in df.columns and "coi" in df.columns:
-            _open = df[df["status"].isin(["Identified", "Validated"])].copy()
-            if not _open.empty:
-                _by_coi = (
-                    _open.groupby("coi")
-                    .agg(initiatives=("id", "count"))
-                    .reset_index()
-                    .sort_values("initiatives", ascending=True)
-                    .tail(10)
-                )
-                fig = px.bar(
-                    _by_coi, x="initiatives", y="coi", orientation="h",
-                    template="plotly_dark",
-                    color_discrete_sequence=[ACCENTURE_PURPLE_LIGHT],
-                    labels={"initiatives": "# Open Initiatives", "coi": "Country"},
-                    text="initiatives",
-                )
-                fig.update_layout(
-                    height=280,
-                    xaxis=dict(tickformat="d"),
-                    **_CL,
-                )
-                fig.update_xaxes(**_AXIS)
-                fig.update_yaxes(**_AXIS)
-                fig.update_traces(
-                    texttemplate="%{text}",
-                    textposition="outside",
-                    hovertemplate="<b>%{y}</b><br>%{x} open initiatives<extra></extra>",
-                )
-                _render_plotly(fig, label="Top 10 Open Initiatives by Country")
-            else:
-                st.info("No open initiatives (Identified or Validated).")
 
     # ── Initiatives editor ────────────────────────────────────────────────────
     st.markdown("### Initiatives table")
@@ -706,28 +604,6 @@ def render_tab_initiatives(df_initiatives: Optional[pd.DataFrame]) -> None:
 
         def _metric_value(row: pd.Series, key: str, is_rate: bool = False) -> str:
             return _pre_fmt_num(row.get(key), is_rate) if key in row.index else ""
-
-        def _render_deflist(metrics: List[tuple], cols: int) -> None:
-            """Render a definition-list row: label above value, no card decoration.
-
-            Each metric is (label, value) or (label, value, tooltip_text).
-            """
-            parts = [f'<div class="ini-deflist" style="--ini-cols: {cols};">']
-            for item in metrics:
-                _lbl = item[0]
-                _val = item[1]
-                _tip = item[2] if len(item) > 2 else ""
-                _txt = _val if _val else "—"
-                _cls = "" if _val else " muted"
-                _tip_attr = f' data-tooltip="{_html.escape(str(_tip))}"' if _tip else ""
-                parts.append(
-                    f'<div class="ini-deflist-item">'
-                    f'<div class="ini-deflist-label"{_tip_attr}>{_html.escape(str(_lbl))}</div>'
-                    f'<div class="ini-deflist-value{_cls}">{_html.escape(str(_txt))}</div>'
-                    f'</div>'
-                )
-            parts.append('</div>')
-            st.markdown("".join(parts), unsafe_allow_html=True)
 
         try:
             from src.db import load_merged_results as _load_tx_detail

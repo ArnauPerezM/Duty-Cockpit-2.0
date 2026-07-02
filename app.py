@@ -1,36 +1,36 @@
+import time
+
 import streamlit as st
 
+import src.runner as runner
 from src.state import init_session_state
 from src.logic import (
     load_transactions_excel,
     validate_and_clean_transactions,
-    run_api_loop,
-    postprocess_results,
 )
 from src.db import (
-    save_run_results,
     load_merged_results,
     get_run_history,
     get_account_label,
     get_query_counter,
     find_duplicate_transactions,
+    load_initiatives,
+    init_db,
 )
-from src.ui import (
+from src.ui_shared import (
+    load_custom_css,
+    render_hero_header,
     render_sidebar_controls,
     render_sidebar_filters,
-    render_hero_header,
-    render_process_pre,
-    render_process_post,
-    render_tab_resultados,
-    render_tab_opportunities,
-    render_tab_initiatives,
-    render_tab_logs,
-    render_tab_reporting,
     render_process_auth_gate,
     render_logout_control,
 )
-from src.ui_shared import load_custom_css
-from src.db import load_initiatives, init_db
+from src.ui_process import render_process_pre, render_process_post
+from src.ui_results import render_tab_results
+from src.ui_opportunities import render_tab_opportunities
+from src.ui_initiatives import render_tab_initiatives
+from src.ui_logs import render_tab_logs
+from src.ui_reporting import render_tab_reporting
 from src.ui_help import render_help_dialog
 
 
@@ -69,7 +69,7 @@ with st.sidebar:
             st.rerun()
 
 if render_hero_header(
-    title="Duty Analyzer",
+    title="Duty Optimizer",
     subtitle="",
     run_state=st.session_state.run_state,
     account_label=st.session_state.account_label,
@@ -103,6 +103,22 @@ ref_date = st.session_state.get("ref_date", "")
 # Process tab
 # ─────────────────────────────────────────────────────────────────────────────
 if active_tab == "Process":
+    # ── Sync background thread → session_state (must run first) ──────────
+    # When the worker thread finishes while the user is on another tab,
+    # session_state.run_state is still "running".  Detect the transition
+    # here before anything else can reset it, and copy the payload in.
+    _rs = runner.get_state()
+    if st.session_state.run_state == "running" and _rs["status"] != "running":
+        _p = _rs.get("payload") or {}
+        st.session_state.df_failed     = _p.get("failed_df")
+        st.session_state.df_ok         = _p.get("ok_df")
+        st.session_state.logs          = _p.get("logs") or []
+        st.session_state.df_merged     = _p.get("df_merged")
+        st.session_state.run_summary   = _p.get("run_summary")
+        st.session_state.db_save_error = _p.get("db_save_error")
+        st.session_state.run_state     = _rs["status"]
+        st.rerun()  # re-render with final state (updates hero header etc.)
+
     # Safe defaults
     uploaded_file   = None
     sheet_name      = "Transactions"
@@ -121,7 +137,7 @@ if active_tab == "Process":
     st.session_state["ref_date"] = ref_date  # share with Reporting tab
 
     if cancel_clicked:
-        st.session_state.cancel_requested = True
+        runner.request_cancel()
         st.info("Cancel requested. The run will stop after the current row finishes.")
 
     # ── Load + validate ───────────────────────────────────────────────────
@@ -139,18 +155,33 @@ if active_tab == "Process":
         except Exception as e:
             load_error = str(e)
 
+    # Guard: don't reset run_state to "ready" when a run is active/finished.
+    # The file uploader loses its widget state when the user visits another tab,
+    # so uploaded_file is None on return even though the run is still live.
+    _active_states = {
+        "running", "completed", "cancelled", "failed",
+        "completed_db_failed", "duplicate_decision", "duplicate_check_failed",
+    }
     if uploaded_file is None:
-        st.session_state.run_state = "ready"
+        if st.session_state.run_state not in _active_states:
+            st.session_state.run_state = "ready"
     elif load_error:
         st.session_state.run_state = "failed"
     else:
-        if st.session_state.run_state not in (
-            "completed", "cancelled", "failed", "running", "duplicate_decision"
-        ):
+        if st.session_state.run_state not in _active_states:
             st.session_state.run_state = "ready"
 
+    # When the file uploader has lost its state but we still have validated
+    # data in session_state (e.g. user switched tabs mid-run), pass a truthy
+    # sentinel so render_process_pre shows the row summary instead of the
+    # "Upload an Excel file" prompt.
+    _display_file = uploaded_file or (
+        True if st.session_state.df_clean is not None
+             and st.session_state.run_state in _active_states
+        else None
+    )
     render_process_pre(
-        uploaded_file=uploaded_file,
+        uploaded_file=_display_file,
         sheet_name=sheet_name,
         load_error=load_error,
         df_clean=st.session_state.df_clean,
@@ -165,138 +196,48 @@ if active_tab == "Process":
     post_container = st.container()
 
     # ── Execution helper ──────────────────────────────────────────────────
-    def _execute_api_run(df_to_run):
-        st.session_state.run_state = "running"
-        _needs_rerun = False
-
-        with exec_container:
-            st.subheader("Execution")
-            status = st.status("Starting E2Open session and processing rows...", expanded=True)
-            progress_bar = st.progress(0)
-
-            total_to_run = len(df_to_run)
-
-            def progress_cb(i: int, total_n: int, msg: str):
-                if total_n > 0:
-                    progress_bar.progress(min(i / total_n, 1.0))
-                status.write(msg)
-
-            def should_cancel() -> bool:
-                return bool(st.session_state.cancel_requested)
-
-            try:
-                status.update(label="Running API calls...", state="running")
-
-                # DEPLOYMENT_NOTE: credentials are read from st.session_state (plain text,
-                # in-process). Safe for local PyInstaller exe (single-user, no network
-                # exposure). For any hosted deployment use st.secrets instead:
-                #   https://docs.streamlit.io/develop/concepts/connections/secrets-management
-                _credentials = {
-                    "username": st.session_state.e2open_username,
-                    "password": st.session_state.e2open_password,
-                    "tenant":   st.session_state.e2open_tenant,
-                    "environment": st.session_state.e2open_env,
-                }
-                failed_df, ok_df, logs = run_api_loop(
-                    df_in=df_to_run,
-                    ref_date=ref_date,
-                    credentials=_credentials,
-                    progress_cb=progress_cb,
-                    should_cancel=should_cancel,
-                )
-
-                st.session_state.logs     = logs
-                st.session_state.df_failed = failed_df
-                st.session_state.df_ok    = ok_df
-
-                processed  = int(ok_df.shape[0] + failed_df.shape[0])
-                missing_n  = (int(st.session_state.df_missing.shape[0])
-                              if st.session_state.df_missing is not None else 0)
-
-                _account_key   = st.session_state.account_key   or None
-                _account_label = st.session_state.account_label or None
-                _environment   = st.session_state.e2open_env    or None
-
-                if should_cancel():
-                    status.update(label="Cancelled by user.", state="error")
-                    st.session_state.run_state = "cancelled"
-                    st.session_state.run_summary = {
-                        "cancelled": True,
-                        "processed": processed,
-                        "ok": int(ok_df.shape[0]),
-                        "failed": int(failed_df.shape[0]),
-                        "missing": missing_n,
-                        "total_candidates": total_to_run,
-                    }
-                    try:
-                        save_run_results(
-                            ok_df, failed_df, None, ref_date,
-                            st.session_state.run_summary,
-                            account_key=_account_key,
-                            account_label=_account_label,
-                            environment=_environment,
-                        )
-                    except Exception as db_err:
-                        st.warning(f"DB save failed (cancelled run): {db_err}")
-                else:
-                    df_merged = postprocess_results(
-                        ok_input_df=df_to_run,
-                        ok_df=ok_df,
-                        failed_df=failed_df,
-                        df_missing=st.session_state.df_missing,
-                        ref_date=ref_date,
-                        logs=logs,
-                    )
-                    st.session_state.df_merged = df_merged
-
-                    status.update(label="Analysis completed.", state="complete")
-                    st.session_state.run_state = "completed"
-                    st.session_state.run_summary = {
-                        "cancelled": False,
-                        "processed": processed,
-                        "ok": int(ok_df.shape[0]),
-                        "failed": int(failed_df.shape[0]),
-                        "missing": missing_n,
-                        "total_candidates": total_to_run,
-                    }
-                    try:
-                        save_run_results(
-                            ok_df, failed_df, df_merged, ref_date,
-                            st.session_state.run_summary,
-                            account_key=_account_key,
-                            account_label=_account_label,
-                            environment=_environment,
-                        )
-                    except Exception as db_err:
-                        st.warning(f"DB save failed: {db_err}")
-                    _needs_rerun = True
-
-            except Exception as e:
-                status.update(label="Execution failed.", state="error")
-                st.session_state.run_state = "failed"
-                st.exception(e)
-
-        if _needs_rerun:
-            st.rerun()
+    # DEPLOYMENT_NOTE: credentials are read from st.session_state (plain text,
+    # in-process). Safe for local PyInstaller exe (single-user, no network
+    # exposure). For any hosted deployment use st.secrets instead:
+    #   https://docs.streamlit.io/develop/concepts/connections/secrets-management
+    def _start_api_run(df_to_run):
+        st.session_state.df_executed = df_to_run.copy()
+        st.session_state.run_state   = "running"
+        runner.start(
+            df_to_run=df_to_run,
+            ref_date=ref_date,
+            credentials={
+                "username":    st.session_state.e2open_username,
+                "password":    st.session_state.e2open_password,
+                "tenant":      st.session_state.e2open_tenant,
+                "environment": st.session_state.e2open_env,
+            },
+            df_missing=st.session_state.df_missing,
+            account_key=st.session_state.account_key   or None,
+            account_label=st.session_state.account_label or None,
+            environment=st.session_state.e2open_env    or None,
+        )
+        st.rerun()
 
     # ── Handle analyze click ──────────────────────────────────────────────
     if analyze_clicked:
         st.session_state.last_run_id   += 1
-        st.session_state.cancel_requested = False
         st.session_state.logs          = []
         st.session_state.df_merged     = None
         st.session_state.df_failed     = None
         st.session_state.df_ok         = None
+        st.session_state.df_executed   = None
         st.session_state.run_summary   = None
         st.session_state.dup_rows      = None
-        st.session_state.dup_decision  = None
+        st.session_state.dup_check_error = None
+        st.session_state.db_save_error = None
         st.session_state.run_state     = "ready"
         st.session_state.db_edit_mode  = "view"
         st.session_state.db_editor_base_df = None
 
         if not st.session_state.auth_ok:
             with exec_container:
-                st.warning("Authentication required. Please connect to E2Open above before running the analysis.")
+                st.warning("Authentication required. Please connect to e2open above before running the analysis.")
         elif uploaded_file is None:
             st.error("Please upload an Excel file before running the analysis.")
         elif load_error:
@@ -307,14 +248,16 @@ if active_tab == "Process":
             try:
                 dups = find_duplicate_transactions(st.session_state.df_clean, ref_date)
             except Exception as _dup_err:
-                st.warning(f"Duplicate check failed ({_dup_err}). Proceeding without duplicate check.")
+                st.session_state.run_state = "duplicate_check_failed"
+                st.session_state.dup_check_error = str(_dup_err)
                 dups = None
 
-            if dups is None or dups.empty:
-                _execute_api_run(st.session_state.df_clean)
-            else:
-                st.session_state.dup_rows  = dups
-                st.session_state.run_state = "duplicate_decision"
+            if st.session_state.run_state != "duplicate_check_failed":
+                if dups is None or dups.empty:
+                    _start_api_run(st.session_state.df_clean)
+                else:
+                    st.session_state.dup_rows  = dups
+                    st.session_state.run_state = "duplicate_decision"
 
     # ── Duplicate decision UI ─────────────────────────────────────────────
     if st.session_state.run_state == "duplicate_decision" and st.session_state.dup_rows is not None:
@@ -324,7 +267,7 @@ if active_tab == "Process":
             new_n   = total_n - dup_n
 
             st.warning(
-                f"**{dup_n} of {total_n} transactions** have already been sent to E2Open "
+                f"**{dup_n} of {total_n} transactions** have already been sent to e2open "
                 f"with this reference date. **{new_n} new** transactions remain unsent."
             )
 
@@ -354,15 +297,61 @@ if active_tab == "Process":
                 df_new = st.session_state.df_clean[
                     ~st.session_state.df_clean.index.isin(dup_idx)
                 ].copy()
-                _execute_api_run(df_new)
+                _start_api_run(df_new)
             elif btn_all:
-                _execute_api_run(st.session_state.df_clean)
+                _start_api_run(st.session_state.df_clean)
+
+    # ── Duplicate-check failure UI ────────────────────────────────────────
+    if st.session_state.run_state == "duplicate_check_failed":
+        with exec_container:
+            st.error(
+                f"**Duplicate check failed** — could not query the database before running the API.\n\n"
+                f"Error: `{st.session_state.dup_check_error}`\n\n"
+                "The API run has been blocked. You can either fix the issue and retry, or "
+                "explicitly proceed without duplicate protection."
+            )
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                btn_proceed = st.button(
+                    "Proceed without duplicate check",
+                    type="primary", key="dup_fail_proceed",
+                )
+            with col2:
+                btn_abort = st.button("Cancel", key="dup_fail_cancel")
+
+            if btn_abort:
+                st.session_state.run_state = "ready"
+                st.session_state.dup_check_error = None
+                st.rerun()
+            elif btn_proceed:
+                st.session_state.run_state = "ready"
+                st.session_state.dup_check_error = None
+                _start_api_run(st.session_state.df_clean)
+
+    # ── Running progress (visible while thread is active) ─────────────────
+    if st.session_state.run_state == "running":
+        _rs_now = runner.get_state()
+        with exec_container:
+            st.subheader("Execution")
+            _cur = _rs_now["current"]
+            _tot = _rs_now["total"]
+            st.progress(min(_cur / _tot, 1.0) if _tot > 0 else 0)
+            _msg = _rs_now.get("last_msg", "")
+            st.caption(f"Row {_cur} / {_tot}" + (f" — {_msg}" if _msg else ""))
 
     # ── Post-run block ────────────────────────────────────────────────────
     if st.session_state.run_summary is not None:
         with post_container:
+            _db_err = st.session_state.get("db_save_error")
+            if _db_err:
+                st.warning(
+                    f"**Results are in memory only** — the database save failed and this run "
+                    f"has not been persisted.\n\nError: `{_db_err}`"
+                )
+            _df_executed = st.session_state.get("df_executed")
+            _df_for_post = _df_executed if _df_executed is not None else st.session_state.df_clean
             render_process_post(
-                df_clean=st.session_state.df_clean,
+                df_clean=_df_for_post,
                 df_missing=st.session_state.df_missing,
                 df_failed=st.session_state.df_failed,
                 df_ok=st.session_state.df_ok,
@@ -370,12 +359,17 @@ if active_tab == "Process":
                 run_summary=st.session_state.run_summary,
             )
 
+    # ── Poll while the background thread is running ───────────────────────
+    if st.session_state.run_state == "running":
+        time.sleep(0.5)
+        st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Results tab
 # ─────────────────────────────────────────────────────────────────────────────
 elif active_tab == "Results":
-    render_tab_resultados(df_merged=df_merged_all)
+    render_tab_results(df_merged=df_merged_all)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

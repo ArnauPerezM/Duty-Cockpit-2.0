@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('app.py', '.'), ('src', 'src'), ('E2Open.py', '.'), ('.streamlit', '.streamlit')]
 binaries = []
-hiddenimports = ['streamlit', 'streamlit.web.cli', 'streamlit.web.bootstrap', 'streamlit.runtime', 'streamlit.runtime.scriptrunner', 'streamlit.runtime.uploaded_file_manager', 'streamlit.components.v1', 'pandas', 'openpyxl', 'openpyxl.styles', 'pycountry', 'plotly', 'plotly.express', 'requests', 'sqlite3', 'E2Open']
+hiddenimports = ['streamlit', 'streamlit.web.cli', 'streamlit.web.bootstrap', 'streamlit.runtime', 'streamlit.runtime.scriptrunner', 'streamlit.runtime.uploaded_file_manager', 'streamlit.components.v1', 'pandas', 'openpyxl', 'openpyxl.styles', 'pycountry', 'plotly', 'plotly.express', 'plotly.graph_objects', 'requests', 'sqlite3', 'E2Open', 'tkinter', 'tkinter.messagebox', 'multiprocessing']
 datas += copy_metadata('streamlit')
 datas += copy_metadata('requests')
 tmp_ret = collect_all('streamlit')
@@ -30,7 +30,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['langchain', 'matplotlib', 'pytest', 'streamlit.external.langchain', 'plotly.matplotlylib', 'pandas.tests'],
     noarchive=False,
     optimize=0,
 )

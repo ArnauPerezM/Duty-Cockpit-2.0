@@ -1,12 +1,12 @@
 @echo off
-title E2Open Duty Optimizer - Build Portable EXE
+title Duty Optimizer - Build Portable EXE
 
 echo.
 echo  =====================================================
-echo   E2Open Duty Optimizer  -  Build Portable EXE
+echo   Duty Optimizer  -  Build Portable EXE
 echo  =====================================================
 echo.
-echo  Build output -^> C:\Temp\DutyOptimizer\
+echo  Build output -^> C:\Temp\DutyOptimizer_dist\DutyOptimizer\
 echo  (outside OneDrive to avoid file-lock errors)
 echo.
 echo  Press any key to start, or Ctrl+C to cancel.
@@ -22,46 +22,13 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] Building bundle (this will take a few minutes)...
+echo [2/3] Building bundle from DutyOptimizer.spec (this will take a few minutes)...
 echo.
 
-pyinstaller ^
-  -y ^
-  --onedir ^
-  --noconsole ^
-  --name DutyOptimizer ^
-  --noupx ^
+pyinstaller -y ^
   --distpath "C:\Temp\DutyOptimizer_dist" ^
   --workpath "C:\Temp\DutyOptimizer_work" ^
-  --collect-all streamlit ^
-  --collect-all plotly ^
-  --collect-all pycountry ^
-  --collect-all openpyxl ^
-  --collect-all pandas ^
-  --collect-all requests ^
-  --copy-metadata streamlit ^
-  --copy-metadata requests ^
-  --hidden-import streamlit ^
-  --hidden-import streamlit.web.cli ^
-  --hidden-import streamlit.web.bootstrap ^
-  --hidden-import streamlit.runtime ^
-  --hidden-import streamlit.runtime.scriptrunner ^
-  --hidden-import streamlit.runtime.uploaded_file_manager ^
-  --hidden-import streamlit.components.v1 ^
-  --hidden-import pandas ^
-  --hidden-import openpyxl ^
-  --hidden-import openpyxl.styles ^
-  --hidden-import pycountry ^
-  --hidden-import plotly ^
-  --hidden-import plotly.express ^
-  --hidden-import requests ^
-  --hidden-import sqlite3 ^
-  --hidden-import E2Open ^
-  --add-data "app.py;." ^
-  --add-data "src;src" ^
-  --add-data "E2Open.py;." ^
-  --add-data ".streamlit;.streamlit" ^
-  launcher.py
+  DutyOptimizer.spec
 
 if errorlevel 1 (
     echo.

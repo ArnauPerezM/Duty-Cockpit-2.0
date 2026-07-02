@@ -1,14 +1,14 @@
-"""
-E2Open Duty Cockpit — launcher
+﻿"""
+Duty Optimizer — launcher
 -----------------------------------------------------------
 Build the portable .exe bundle with:   build_exe.bat
-Distribute the entire dist/DutyCockpit/ folder.
-End-users double-click DutyCockpit.exe — no Python needed.
+Distribute the entire dist/DutyOptimizer/ folder.
+End-users double-click DutyOptimizer.exe — no Python needed.
 -----------------------------------------------------------
 Architecture:
   - Main process  → Tkinter status window
   - Worker process → the same .exe respawned with env var
-                     _DUTYCOCKPIT_WORKER=1; runs Streamlit
+                     _DUTYOPTIMIZER_WORKER=1; runs Streamlit
     (subprocess instead of multiprocessing avoids frozen-app
      multiprocessing quirks that break Streamlit's async server)
 -----------------------------------------------------------
@@ -23,7 +23,7 @@ import time
 import threading
 import webbrowser
 
-_WORKER_ENV = "_DUTYCOCKPIT_WORKER"
+_WORKER_ENV = "_DUTYOPTIMIZER_WORKER"
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ def _bundle_dir() -> str:
 
 
 def _exe_dir() -> str:
-    """Directory that contains DutyCockpit.exe (parent of _internal)."""
+    """Directory that contains DutyOptimizer.exe (parent of _internal)."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -110,7 +110,7 @@ def main() -> None:
     from tkinter import messagebox
 
     PORT      = 8501
-    APP_TITLE = "E2Open Duty Cockpit"
+    APP_TITLE = "Duty Optimizer"
     APP_URL   = f"http://localhost:{PORT}"
     PURPLE    = "#A100FF"
     DARK_PRP  = "#460073"
@@ -123,7 +123,7 @@ def main() -> None:
         messagebox.showerror(
             APP_TITLE,
             f"app.py not found in:\n{bundle}\n\n"
-            "Make sure DutyCockpit.exe is inside the DutyCockpit folder.",
+            "Make sure DutyOptimizer.exe is inside the DutyOptimizer folder.",
         )
         return
 

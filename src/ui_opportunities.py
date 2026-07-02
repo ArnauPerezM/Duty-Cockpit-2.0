@@ -22,6 +22,7 @@ from src.ui_shared import (
     _render_plotly,
     _safe_str,
     _stripe,
+    _strip_date_cols,
 )
 
 
@@ -132,7 +133,7 @@ def render_tab_opportunities(
     _CHART_LAYOUT = dict(
         height=310,
         margin=dict(l=0, r=8, t=10, b=0),
-        paper_bgcolor="rgba(255,255,255,0.06)",
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
         xaxis=dict(
@@ -320,7 +321,7 @@ def render_tab_opportunities(
 
     # ── Grouped table with row selection ──────────────────────────────────────
     st.markdown("### Opportunities table (grouped by COO · COI · HS Code · Material Number)")
-    st.caption("Check rows and click **Create Initiative** to promote them.")
+    st.caption("Select rows to see individual transactions below. Click **Create Initiative** to promote selected rows.")
 
     group_cols = [c for c in ["coo", "coi", "hs code", "material number"] if c in df.columns]
 
@@ -411,7 +412,7 @@ def render_tab_opportunities(
     grouped = grouped.reset_index(drop=True)
 
     # ── Filter: exclude rows that already have an initiative (default ON) ──────
-    _has_ini_mask = grouped["Initiative"].str.len() > 0
+    _has_ini_mask = grouped["Initiative"].fillna("").astype(str).str.len() > 0
     _n_with_ini   = int(_has_ini_mask.sum())
     _show_ini = st.checkbox(
         f"Show opportunities with existing initiatives ({_n_with_ini})",
@@ -573,7 +574,7 @@ def render_tab_opportunities(
     n_existing = int(already_exist_mask.sum())
     n_new = n_sel - n_existing
 
-    _opp_btn1, _opp_btn2, info_col = st.columns([2, 2, 4])
+    _opp_btn1, info_col = st.columns([2, 6])
     with _opp_btn1:
         create_clicked = st.button(
             f"Create Initiative ({n_sel} rows)" if n_sel > 0 else "Create Initiative",
@@ -581,14 +582,6 @@ def render_tab_opportunities(
             disabled=(n_sel == 0),
             key="opp_btn_create_initiative",
             width='stretch',
-        )
-    with _opp_btn2:
-        drill_results_clicked = st.button(
-            f"Show Details ({n_sel})" if n_sel > 0 else "Show Details",
-            key="opp_btn_drill_results",
-            disabled=(n_sel == 0),
-            width='stretch',
-            help="Show matching transactions in the Results tab",
         )
     with info_col:
         if n_sel > 0:
@@ -605,17 +598,6 @@ def render_tab_opportunities(
                 )
             else:
                 st.caption(f"{n_new} new row(s) selected — click to promote to Initiatives tab.")
-
-    if drill_results_clicked and n_sel > 0:
-        st.session_state["opp_drill_results"] = {
-            "coo": sel_rows_all["coo"].dropna().astype(str).str.strip().unique().tolist(),
-            "coi": sel_rows_all["coi"].dropna().astype(str).str.strip().unique().tolist(),
-            "hs":  sel_rows_all["hs code"].dropna().astype(str).str.strip().unique().tolist(),
-        }
-        st.rerun()
-
-    if st.session_state.get("opp_drill_results"):
-        st.info("Drill-down active — click the **Results** tab to view filtered transactions.", icon="→")
 
     if create_clicked and n_new > 0:
         from src.db import save_initiatives as _save_init
@@ -646,3 +628,64 @@ def render_tab_opportunities(
         saved = _save_init(records)
         st.success(f"{saved} initiative(s) created successfully. Check the Initiatives tab.")
         st.rerun()
+
+    # ── Inline transaction details for selected rows ───────────────────────────
+    if selected_indices:
+        st.markdown("---")
+        st.markdown("### Transaction Details")
+        for _idx in selected_indices:
+            _sel_row = grouped.iloc[_idx]
+            _scoo = str(_sel_row.get("coo", "")).strip()
+            _scoi = str(_sel_row.get("coi", "")).strip()
+            _shs  = str(_sel_row.get("hs code", "")).strip()
+            _smat = str(_sel_row.get("material number", "")).strip() if "material number" in _sel_row.index else ""
+
+            _exp_label = f"{_scoo} · {_scoi} · {_shs}"
+            if _smat:
+                _exp_label += f" · {_smat}"
+
+            with st.expander(_exp_label, expanded=True):
+                _tmask = (
+                    (df["coo"].astype(str).str.strip() == _scoo) &
+                    (df["coi"].astype(str).str.strip() == _scoi) &
+                    (df["hs code"].astype(str).str.strip() == _shs)
+                )
+                if _smat and "material number" in df.columns:
+                    _tmask = _tmask & (
+                        df["material number"].fillna("").astype(str).str.strip() == _smat
+                    )
+                _tx_detail = df[_tmask].copy()
+
+                if _tx_detail.empty:
+                    st.info("No matching transactions found.")
+                else:
+                    _detail_cols = [c for c in [
+                        "date", "invoice number", "material number",
+                        "coo", "coi", "hs code",
+                        "customs value", "duty paid",
+                        "Default Duties", "Minimum Duties",
+                        "Default Duty Rate", "Min Duty Rate",
+                        "Min Duty Program", "Min Duty Program Description",
+                        "status",
+                    ] if c in _tx_detail.columns]
+                    _tx_sub = _strip_date_cols(_tx_detail[_detail_cols], ["date"])
+                    _tx_disp = _tx_sub.copy()
+                    # Inject per-row overpayment after "duty paid" for quick scanning
+                    if "_overpaid" in _tx_detail.columns:
+                        _insert_pos = (
+                            _tx_disp.columns.get_loc("duty paid") + 1
+                            if "duty paid" in _tx_disp.columns
+                            else len(_tx_disp.columns)
+                        )
+                        _tx_disp.insert(_insert_pos, "Overpaid Duties", _tx_detail["_overpaid"].values)
+                    for _tc in _tx_disp.columns:
+                        if pd.api.types.is_float_dtype(_tx_disp[_tc]):
+                            _ir = "rate" in _tc.lower()
+                            _tx_disp[_tc] = _tx_disp[_tc].apply(
+                                lambda v, x=_ir: _pre_fmt_num(v, x)
+                            )
+                    st.dataframe(
+                        _stripe(_tx_disp),
+                        hide_index=True,
+                        width='stretch',
+                    )

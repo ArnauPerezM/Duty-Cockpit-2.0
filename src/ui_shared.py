@@ -66,12 +66,15 @@ def render_hero_header(
     """
     state = (run_state or "ready").lower().strip()
     state_map = {
-        "ready":     ("Ready",     ACCENTURE_PURPLE_LIGHT,         "rgba(161,0,255,0.10)"),
-        "blocked":   ("Blocked",   "rgba(255,165,0,0.85)",         "rgba(255,165,0,0.10)"),
-        "running":   ("Running",   ACCENTURE_PURPLE_CORE,          "rgba(161,0,255,0.15)"),
-        "completed": ("Completed", "rgba(120,255,200,0.90)",       "rgba(40,200,120,0.12)"),
-        "failed":    ("Failed",    "rgba(255,120,120,0.90)",       "rgba(255,60,60,0.12)"),
-        "cancelled": ("Cancelled", "rgba(255,120,120,0.90)",       "rgba(255,60,60,0.12)"),
+        "ready":                   ("Ready",              ACCENTURE_PURPLE_LIGHT,        "rgba(161,0,255,0.10)"),
+        "blocked":                 ("Blocked",            "rgba(255,165,0,0.85)",        "rgba(255,165,0,0.10)"),
+        "running":                 ("Running",            ACCENTURE_PURPLE_CORE,         "rgba(161,0,255,0.15)"),
+        "completed":               ("Completed",          "rgba(120,255,200,0.90)",      "rgba(40,200,120,0.12)"),
+        "completed_db_failed":     ("Completed (no DB)",  "rgba(255,200,80,0.90)",       "rgba(200,140,0,0.12)"),
+        "failed":                  ("Failed",             "rgba(255,120,120,0.90)",      "rgba(255,60,60,0.12)"),
+        "cancelled":               ("Cancelled",          "rgba(255,120,120,0.90)",      "rgba(255,60,60,0.12)"),
+        "duplicate_decision":      ("Review duplicates",  "rgba(255,165,0,0.85)",        "rgba(255,165,0,0.10)"),
+        "duplicate_check_failed":  ("Check failed",       "rgba(255,120,120,0.90)",      "rgba(255,60,60,0.12)"),
     }
     label, dot_color, chip_bg = state_map.get(state, state_map["ready"])
 
@@ -134,7 +137,7 @@ def _reset_sidebar_filters() -> None:
 
 
 def _apply_sidebar_filters(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-    """Apply global sidebar (sf_*) selectbox filters. Returns filtered copy."""
+    """Apply global sidebar (sf_*) multiselect filters. Returns filtered copy."""
     if df is None or df.empty:
         return df
     df = df.copy()
@@ -143,23 +146,23 @@ def _apply_sidebar_filters(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    sf_coo = st.session_state.get("sf_coo", "All")
-    sf_coi = st.session_state.get("sf_coi", "All")
-    sf_hs  = st.session_state.get("sf_hs",  "All")
-    sf_mat = st.session_state.get("sf_material", "All")
+    sf_coo = st.session_state.get("sf_coo", [])
+    sf_coi = st.session_state.get("sf_coi", [])
+    sf_hs  = st.session_state.get("sf_hs",  [])
+    sf_mat = st.session_state.get("sf_material", [])
 
-    if sf_coo and sf_coo != "All" and "coo" in df.columns:
-        df = df[df["coo"] == sf_coo]
-    if sf_coi and sf_coi != "All" and "coi" in df.columns:
-        df = df[df["coi"] == sf_coi]
-    if sf_hs and sf_hs != "All":
+    if sf_coo and "coo" in df.columns:
+        df = df[df["coo"].isin(sf_coo)]
+    if sf_coi and "coi" in df.columns:
+        df = df[df["coi"].isin(sf_coi)]
+    if sf_hs:
         hs_col = next((c for c in ["hs code", "hs_code"] if c in df.columns), None)
         if hs_col:
-            df = df[df[hs_col].astype(str).str.strip() == sf_hs]
-    if sf_mat and sf_mat != "All":
+            df = df[df[hs_col].astype(str).str.strip().isin(sf_hs)]
+    if sf_mat:
         mat_col = next((c for c in ["material number", "material_number"] if c in df.columns), None)
         if mat_col:
-            df = df[df[mat_col].astype(str).str.strip() == sf_mat]
+            df = df[df[mat_col].astype(str).str.strip().isin(sf_mat)]
 
     sf_from = st.session_state.get("sf_date_from")
     sf_to   = st.session_state.get("sf_date_to")
@@ -272,12 +275,9 @@ def render_sidebar_filters(df_merged: Optional[pd.DataFrame] = None) -> None:
     from datetime import date as _date_t
 
     st.image("src/logo.png", width='stretch')
-    st.divider()
-    st.markdown("**Filters**")
 
     if df_merged is None or df_merged.empty:
         st.caption("Run an analysis to enable filters.")
-        st.divider()
         if st.button("Reset Filter", key="sf_reset", width='stretch'):
             _reset_sidebar_filters()
             st.rerun()
@@ -297,42 +297,35 @@ def render_sidebar_filters(df_merged: Optional[pd.DataFrame] = None) -> None:
         _all_d  = pd.to_datetime(df_merged[_date_col], errors="coerce").dropna()
         _min_d  = _all_d.min().date()
         _max_d  = _all_d.max().date()
-        st.markdown("**Time**")
         if "sf_date_from" not in st.session_state:
             st.session_state.sf_date_from = _min_d
         if "sf_date_to" not in st.session_state:
             st.session_state.sf_date_to = _max_d
         st.date_input("From", min_value=_min_d, max_value=_max_d, key="sf_date_from")
         st.date_input("To",   min_value=_min_d, max_value=_max_d, key="sf_date_to")
-        st.markdown("")
 
     # ── COO ───────────────────────────────────────────────────────────────
     if "coo" in df_merged.columns:
-        _opts = ["All"] + sorted(df_merged["coo"].dropna().astype(str).str.strip().unique().tolist())
-        st.markdown("**Origin Country (COO)**")
-        st.selectbox("Origin Country (COO)", options=_opts, key="sf_coo", label_visibility="collapsed")
+        _opts = sorted(df_merged["coo"].dropna().astype(str).str.strip().unique().tolist())
+        st.multiselect("Origin Country (COO)", options=_opts, key="sf_coo", label_visibility="visible", placeholder="All")
 
     # ── COI ───────────────────────────────────────────────────────────────
     if "coi" in df_merged.columns:
-        _opts = ["All"] + sorted(df_merged["coi"].dropna().astype(str).str.strip().unique().tolist())
-        st.markdown("**Import Country (COI)**")
-        st.selectbox("Import Country (COI)", options=_opts, key="sf_coi", label_visibility="collapsed")
+        _opts = sorted(df_merged["coi"].dropna().astype(str).str.strip().unique().tolist())
+        st.multiselect("Import Country (COI)", options=_opts, key="sf_coi", label_visibility="visible", placeholder="All")
 
     # ── HS Code ───────────────────────────────────────────────────────────
     _hs_col = next((c for c in ["hs code", "hs_code"] if c in df_merged.columns), None)
     if _hs_col:
-        _opts = ["All"] + sorted(df_merged[_hs_col].dropna().astype(str).str.strip().unique().tolist())
-        st.markdown("**HS Code**")
-        st.selectbox("HS Code", options=_opts, key="sf_hs", label_visibility="collapsed")
+        _opts = sorted(df_merged[_hs_col].dropna().astype(str).str.strip().unique().tolist())
+        st.multiselect("HS Code", options=_opts, key="sf_hs", label_visibility="visible", placeholder="All")
 
     # ── Material ──────────────────────────────────────────────────────────
     _mat_col = next((c for c in ["material number", "material_number"] if c in df_merged.columns), None)
     if _mat_col:
-        _opts = ["All"] + sorted(df_merged[_mat_col].dropna().astype(str).str.strip().unique().tolist())
-        st.markdown("**Material Number**")
-        st.selectbox("Material Number", options=_opts, key="sf_material", label_visibility="collapsed")
+        _opts = sorted(df_merged[_mat_col].dropna().astype(str).str.strip().unique().tolist())
+        st.multiselect("Material Number", options=_opts, key="sf_material", label_visibility="visible", placeholder="All")
 
-    st.markdown("")
     st.divider()
     if st.button("Reset Filter", key="sf_reset", width='stretch'):
         _reset_sidebar_filters()
@@ -347,12 +340,12 @@ def render_process_auth_gate(existing_label: str = "") -> None:
     """
     Inline credential form inside the Process tab.
     existing_label: pre-fill Account name if previously stored for these credentials.
-    Self-contained: validates against E2Open, saves label to DB, updates session_state.
+    Self-contained: validates against e2open, saves label to DB, updates session_state.
     """
-    st.info("Connect to E2Open to enable API execution.", icon="🔒")
+    st.info("Connect to e2open to enable API execution.", icon="🔒")
 
     with st.form("e2open_auth", clear_on_submit=False):
-        st.markdown("**E2Open credentials**")
+        st.markdown("**e2open credentials**")
         environment = st.selectbox("Environment", ["UAT", "PRO"])
         username = st.text_input("User ID", placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
         password = st.text_input("Password", type="password", placeholder="••••••••••••••••••••")
@@ -363,7 +356,7 @@ def render_process_auth_gate(existing_label: str = "") -> None:
             placeholder="e.g. Accenture UAT",
             help="A short name shown in the header to identify this connection. Saved for future sessions.",
         )
-        submitted = st.form_submit_button("Connect to E2Open", type="primary", width='stretch')
+        submitted = st.form_submit_button("Connect to e2open", type="primary", width='stretch')
 
     if submitted:
         u = username.strip()

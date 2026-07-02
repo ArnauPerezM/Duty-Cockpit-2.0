@@ -13,9 +13,9 @@ from src.ui_shared import (
     ACCENTURE_PURPLE_DARKEST,
     ACCENTURE_PURPLE_LIGHT,
     ACCENTURE_PURPLE_LIGHTEST,
+    _apply_sidebar_filters,
     _render_plotly,
     _fmt_num,
-    _fmt_int,
     _render_empty_state,
     _render_kpi_cards,
 )
@@ -89,14 +89,14 @@ def _styled_fig(fig: go.Figure, height: int = 280) -> go.Figure:
     fig.update_layout(
         height=height,
         template="plotly_dark",
-        paper_bgcolor="rgba(255,255,255,0.03)",
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=8, r=8, t=32, b=8),
+        margin=dict(l=8, r=8, t=24, b=8),
         font=dict(family="sans-serif", size=12, color="rgba(255,255,255,0.80)"),
         legend=dict(
             bgcolor="rgba(0,0,0,0)",
-            bordercolor="rgba(255,255,255,0.10)",
-            borderwidth=1,
+            bordercolor="rgba(0,0,0,0)",
+            borderwidth=0,
             font=dict(size=11),
         ),
     )
@@ -154,6 +154,10 @@ def render_tab_reporting(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Apply global sidebar filters so charts, KPIs and the downloaded report all
+    # reflect exactly what the user has filtered in the sidebar.
+    df = _apply_sidebar_filters(df)
+
     # ── Compute top-level KPIs ────────────────────────────────────────────────
     total_cv   = df["customs value"].sum() if "customs value" in df.columns else 0.0
     total_dp   = df["duty paid"].sum()     if "duty paid"     in df.columns else 0.0
@@ -164,7 +168,7 @@ def render_tab_reporting(
     # Overpaid duties from transactions (Duty Paid − Minimum Duties)
     overpaid_total = 0.0
     if "duty paid" in df.columns and "Minimum Duties" in df.columns:
-        overpaid_total = (df["duty paid"] - df["Minimum Duties"].fillna(df["duty paid"])).clip(lower=0).sum()
+        overpaid_total = (df["duty paid"] - df["Minimum Duties"].fillna(0)).clip(lower=0).sum()
 
     # Initiative-level savings metrics
     ini_savings_realized = 0.0
@@ -186,7 +190,7 @@ def render_tab_reporting(
     with _dl_col:
         try:
             _report_bytes = _build_report(
-                df_merged=df_merged, df_failed=df_failed, df_missing=df_missing,
+                df_merged=df, df_failed=df_failed, df_missing=df_missing,
                 run_summary=run_summary, ref_date=ref_date or "",
                 account_label=account_label, environment=environment,
                 df_initiatives=df_initiatives,
@@ -238,7 +242,7 @@ def render_tab_reporting(
             _map_src, _map_label = "customs value", "Customs Value (€)"
         elif _map_metric == "Overpaid Duties":
             _df_map["_map_val"] = (
-                _df_map["duty paid"] - _df_map["Minimum Duties"].fillna(_df_map["duty paid"])
+                _df_map["duty paid"] - _df_map["Minimum Duties"].fillna(0)
             ).clip(lower=0)
             _map_src, _map_label = "_map_val", "Overpaid Duties (€)"
         else:
@@ -263,25 +267,38 @@ def render_tab_reporting(
                 labels={_map_label: _map_label},
             )
             fig_map.update_geos(
+                projection_type="natural earth",
                 showframe=False,
                 showcoastlines=True,
-                coastlinecolor="rgba(255,255,255,0.15)",
+                coastlinecolor="rgba(255,255,255,0.18)",
+                coastlinewidth=0.6,
                 showland=True,
-                landcolor="rgba(255,255,255,0.05)",
+                landcolor="rgba(38,28,60,0.92)",
                 showocean=True,
-                oceancolor="rgba(0,0,0,0)",
+                oceancolor="rgba(22,16,40,0.92)",
                 showlakes=False,
+                showrivers=False,
+                showcountries=True,
+                countrycolor="rgba(255,255,255,0.10)",
+                countrywidth=0.4,
                 bgcolor="rgba(0,0,0,0)",
+                lataxis_showgrid=True,
+                lataxis_gridcolor="rgba(255,255,255,0.05)",
+                lonaxis_showgrid=True,
+                lonaxis_gridcolor="rgba(255,255,255,0.05)",
             )
             fig_map.update_coloraxes(
                 colorbar=dict(
                     thickness=10,
-                    len=0.6,
+                    len=0.65,
                     tickfont=dict(size=10, color="rgba(255,255,255,0.60)"),
-                    title=dict(font=dict(size=10)),
+                    title=dict(font=dict(size=10, color="rgba(255,255,255,0.60)")),
+                    bgcolor="rgba(0,0,0,0)",
+                    borderwidth=0,
                 )
             )
-            _styled_fig(fig_map, height=340)
+            _styled_fig(fig_map, height=480)
+            fig_map.update_layout(margin=dict(l=0, r=0, t=4, b=0))
             _chart_card(fig_map)
         else:
             st.caption("No valid country codes found for map rendering.")
@@ -322,7 +339,7 @@ def render_tab_reporting(
         if "coi" in df.columns and "duty paid" in df.columns and "Minimum Duties" in df.columns:
             _df_op = df.copy()
             _df_op["_overpaid"] = (
-                _df_op["duty paid"] - _df_op["Minimum Duties"].fillna(_df_op["duty paid"])
+                _df_op["duty paid"] - _df_op["Minimum Duties"].fillna(0)
             ).clip(lower=0)
             top_op = (
                 _df_op.groupby("coi", as_index=False)["_overpaid"]
@@ -471,7 +488,7 @@ def render_tab_reporting(
             monthly = trend.groupby("_month").agg(**_agg).reset_index()
             monthly["_month"] = monthly["_month"].astype(str)
             if _has_min:
-                monthly["Minimum Duties"] = monthly["Minimum Duties"].fillna(monthly["Duty Paid"])
+                monthly["Minimum Duties"] = monthly["Minimum Duties"].fillna(0)
 
             fig_trend = go.Figure()
 
@@ -501,7 +518,7 @@ def render_tab_reporting(
             ))
 
             fig_trend.update_layout(
-                title="Monthly Duty Paid vs Minimum Duties (amber area = Overpaid)",
+                title="Monthly Trend — Duty Paid vs Minimum Duties",
                 xaxis=dict(title=None, showgrid=False, tickangle=-35),
                 yaxis=dict(title="EUR", showgrid=True,
                            gridcolor="rgba(255,255,255,0.06)"),

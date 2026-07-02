@@ -310,48 +310,66 @@ div.block-container {
   animation: kpiIn 0.45s ease both;
 }
 
-/* ── Tab navigation (st.radio styled as horizontal tabs) ────────── */
+/* ── Tab navigation (st.radio styled as pill nav) ────────────────── */
 .st-key-duty_tab_nav {
-  margin: 0 0 14px 0;
-  border-bottom: 1px solid rgba(194,163,255,0.18);
+  margin: 0 0 18px 0;
+  width: 100% !important;
+}
+/* Force all Streamlit wrapper divs inside the nav to full width */
+.st-key-duty_tab_nav > div,
+.st-key-duty_tab_nav [data-testid="stRadio"] {
+  width: 100% !important;
+  display: block !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] {
+  display: flex !important;
   flex-direction: row !important;
-  flex-wrap: wrap !important;
-  gap: 0 !important;
+  flex-wrap: nowrap !important;
+  gap: 8px !important;
   margin: 0 !important;
   padding: 0 !important;
+  width: 100% !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] > label {
+  flex: 1 1 0 !important;
   margin: 0 !important;
-  padding: 10px 22px 9px 22px !important;
-  border-bottom: 2px solid transparent;
+  padding: 9px 8px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(255,255,255,.09) !important;
+  background: rgba(255,255,255,.025) !important;
   cursor: pointer;
-  transition: color 0.18s ease, border-color 0.18s ease;
-  background: transparent !important;
+  transition: border-color 0.25s, background 0.25s, box-shadow 0.25s;
   position: relative;
+  text-align: center !important;
+  justify-content: center !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] > label:hover {
-  color: rgba(255,255,255,0.95) !important;
-  border-bottom-color: rgba(194,163,255,0.30);
+  border-color: rgba(161,0,255,.50) !important;
+  background: rgba(161,0,255,.12) !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] > label > div:first-child {
-  /* Hide the radio circle */
   display: none !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] > label > div:nth-child(2),
 .st-key-duty_tab_nav div[role="radiogroup"] > label p {
-  font-size: 14px !important;
-  font-weight: 500 !important;
-  color: rgba(255,255,255,0.62);
+  font-size: 13px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  color: rgba(255,255,255,.66) !important;
+  text-align: center !important;
+  width: 100% !important;
 }
+/* Active pill — solid purple gradient */
 .st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) {
-  border-bottom-color: var(--accenture-purple-core) !important;
+  background: linear-gradient(120deg, rgba(161,0,255,.94), rgba(123,45,255,.78)) !important;
+  border-color: rgba(255,255,255,.18) !important;
+  box-shadow: 0 0 22px -6px rgba(161,0,255,.75) !important;
 }
 .st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) > div:nth-child(2),
 .st-key-duty_tab_nav div[role="radiogroup"] > label:has(input:checked) p {
-  color: var(--accenture-purple-core) !important;
-  font-weight: 700 !important;
+  color: #fff !important;
+  font-weight: 800 !important;
 }
 
 /* ── Initiative details — section headers & date cards ─────────── */
@@ -517,6 +535,16 @@ div.block-container {
 [data-testid="stSidebar"] .stButton > button {
   border: 1px solid rgba(194,163,255,0.25);
   box-shadow: 0 8px 18px rgba(0,0,0,0.22);
+}
+/* Sidebar filter labels — compact, uppercase, muted */
+[data-testid="stSidebar"] div[data-testid="stMultiSelect"] label p,
+[data-testid="stSidebar"] div[data-testid="stDateInput"] label p {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.07em !important;
+  color: rgba(255,255,255,0.55) !important;
+  margin-bottom: 2px !important;
 }
 
 /* ── Layout ───────────────────────────────────────────────────── */

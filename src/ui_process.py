@@ -13,7 +13,6 @@ from src.ui_shared import (
     ACCENTURE_PURPLE_DARKEST,
     ACCENTURE_PURPLE_LIGHT,
     ACCENTURE_PURPLE_LIGHTEST,
-    _fmt_num,
     _fmt_int,
     _fmt_pct,
     _render_kpi_cards,
@@ -209,7 +208,7 @@ def _render_country_map_and_top10(metrics_df: pd.DataFrame) -> None:
     fig.update_layout(
         height=700,
         margin=dict(l=0, r=0, t=45, b=0),
-        paper_bgcolor="rgba(255,255,255,0.06)",
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         coloraxis_colorbar=dict(
             outlinewidth=0,
@@ -283,7 +282,7 @@ def render_process_pre(
         {
             "label": "Candidate rows",
             "value": _fmt_int(candidates),
-            "sub": "Eligible rows for E2Open calls",
+            "sub": "Eligible rows for e2open calls",
             "icon": "🧾",
             "delta": f"{_fmt_int(missing)} missing (skipped)",
             "delta_kind": "neutral",

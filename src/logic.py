@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import time
@@ -73,7 +73,7 @@ def _fetch_fx_rates_eur() -> dict:
 
 
 # -----------------------------
-# Helpers de limpieza / normalización
+# Cleaning / normalisation helpers
 # -----------------------------
 
 def _to_lower_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -82,7 +82,36 @@ def _to_lower_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 def _clean_hs(x: Any) -> str:
-    return re.sub(r"\D", "", str(x)).strip()
+    if pd.isna(x):
+        return ""
+
+    if isinstance(x, int):
+        return str(x).strip()
+
+    if isinstance(x, float):
+        if pd.isna(x):
+            return ""
+        if x.is_integer():
+            return str(int(x))
+        # Non-integer float: strip decimals without scientific notation
+        return re.sub(r"\D", "", f"{x:.0f}").strip()
+
+    s = str(x).strip()
+    if s == "" or s.lower() == "nan":
+        return ""
+
+    # Scientific notation: e.g. "8.518302E+09"
+    if re.fullmatch(r"[+-]?\d+(\.\d+)?[eE][+-]?\d+", s):
+        try:
+            return str(int(float(s)))
+        except Exception:
+            pass
+
+    # Numeric string with trailing .0: e.g. "8518302000.0"
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".")[0]
+
+    return re.sub(r"\D", "", s).strip()
 
 def _clean_country(x: Any) -> str:
     if pd.isna(x) or str(x).strip() == "" or str(x).strip().lower() == "nan":
@@ -106,17 +135,17 @@ def _clean_customs_value(x: Any) -> float:
     return float(v)
 
 def _find_column(df_lower: pd.DataFrame, desired_lower: str) -> Optional[str]:
-    # por si hay espacios u otras variaciones mínimas
+    # handles spaces and other minor variations
     cols = list(df_lower.columns)
     if desired_lower in cols:
         return desired_lower
-    # fallback: normalizar espacios múltiples
+    # fallback: normalise multiple spaces
     norm = {re.sub(r"\s+", " ", c.strip().lower()): c for c in cols}
     key = re.sub(r"\s+", " ", desired_lower.strip().lower())
     return norm.get(key)
 
 # -----------------------------
-# Carga Excel (cacheada en app.py vía st.cache_data indirectamente)
+# Excel loading (cached indirectly via st.cache_data in app.py)
 # -----------------------------
 
 _REQUIRED_COLUMNS = [
@@ -150,7 +179,7 @@ def load_transactions_excel(uploaded_file, sheet_name: str = "Transactions") -> 
     return df
 
 # -----------------------------
-# Estandarización Currencies + Validación + limpieza
+# Currency standardisation + validation + cleanup
 # -----------------------------
 
 def _convert_customs_value_to_eur(df: pd.DataFrame) -> Tuple[pd.DataFrame, list]:
@@ -186,7 +215,10 @@ def _convert_customs_value_to_eur(df: pd.DataFrame) -> Tuple[pd.DataFrame, list]
         rates = rates.fillna(1.0)  # pass-through: no conversion, value kept as-is
 
     out["customs value"] = (pd.to_numeric(out["customs value"], errors="coerce").fillna(0.0) * rates).round(2)
-    out["cv currency"] = out["cv currency"].where(~missing, other=out["cv currency original"])
+    # If conversion succeeded, the value is now EUR.
+    # If no FX rate was found, keep original currency and original amount.
+    out["cv currency"] = "EUR"
+    out.loc[missing, "cv currency"] = out.loc[missing, "cv currency original"]
     return out, missing_ccy
 
 def validate_and_clean_transactions(
@@ -199,10 +231,11 @@ def validate_and_clean_transactions(
     - Calcula warnings ratios (HS>=6, COO/COI ISO2)
     """
     df = _to_lower_columns(df_original)
+    df = df.copy()
+    df["_tx_id"] = df.index.astype(str)
 
     analyzed_col = _find_column(df, "analyzed")
     if analyzed_col is not None:
-        # main2: df[df['Analyzed'] == False]
         df = df[df[analyzed_col] == False]  # noqa: E712
 
     if df.empty:
@@ -222,13 +255,13 @@ def validate_and_clean_transactions(
             f"Expected: {_REQUIRED_COLUMNS}."
         )
 
-    # Normalizar nombres esperados (en caso de variantes mínimas)
+    # Normalise expected column names (handles minor variations)
     colmap = {}
     for c in _REQUIRED_COLUMNS:
         colmap[_find_column(df, c)] = c
     df = df.rename(columns=colmap)
 
-    # Weight es opcional — default 1.0 si la columna no existe
+    # Weight is optional — defaults to 1.0 if the column is absent
     _weight_col = _find_column(df, "weight")
     if _weight_col is not None:
         if _weight_col != "weight":
@@ -237,7 +270,7 @@ def validate_and_clean_transactions(
     else:
         df["weight"] = 1.0
 
-    # Limpiezas base
+    # Base cleanup
     df["customs value"] = df["customs value"].apply(_clean_customs_value)
     df["hs code"] = df["hs code"].apply(_clean_hs)
     df["coo"] = df["coo"].apply(_clean_country)
@@ -247,7 +280,7 @@ def validate_and_clean_transactions(
     # Standardize all transactions to EUR (using local FX file)
     df, _fx_missing = _convert_customs_value_to_eur(df)
 
-    # df_missing: COO/COI/HS vacíos o customs value 0
+    # df_missing: rows with empty COO/COI/HS or zero customs value
     df_missing = df[
         (df["coo"].astype(str).str.strip() == "")
         | (df["coi"].astype(str).str.strip() == "")
@@ -256,7 +289,7 @@ def validate_and_clean_transactions(
         | (df["customs value"] == 0.0)
     ].copy()
 
-    # df limpio para procesar
+    # clean df ready to process
     df_ok = df[
         (df["coo"].astype(str).str.strip() != "")
         & (df["coi"].astype(str).str.strip() != "")
@@ -264,8 +297,9 @@ def validate_and_clean_transactions(
         & (df["customs value"] != 0.0)
     ].copy()
 
-    # drop duplicates
-    df_ok = df_ok.drop_duplicates()
+    # drop duplicates — exclude _tx_id so business deduplication is unchanged
+    _dup_subset = [c for c in df_ok.columns if c != "_tx_id"]
+    df_ok = df_ok.drop_duplicates(subset=_dup_subset)
 
     # Warnings ratios
     hs_ratio = 1.0
@@ -328,7 +362,7 @@ def run_api_loop(
     max_retries: int = 3,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[Dict[str, Any]]]:
     """
-    Ejecuta sesión E2Open y pide getImportCost por fila.
+    Ejecuta sesión e2open y pide getImportCost por fila.
     - Sin input() de retry: reintenta hasta max_retries, luego falla fila y continúa.
     - Devuelve: failed_df (mismas cols clave), ok_df (lanes procesadas), logs (eventos)
     """
@@ -363,44 +397,70 @@ def run_api_loop(
         cust_val = row["customs value"]
         cur = row["cv currency"]
         qnty = row["weight"]
+        tx_id = str(row["_tx_id"]) if "_tx_id" in df_in.columns else str(ridx)
 
         attempt = 0
         success = False
         last_err = None
+        last_status = None
+        last_comment = ""
 
         while attempt < max_retries and not success:
             attempt += 1
             try:
                 coo2, coi2, hs2, cust_val2, cur2, qnty2, status, comment = session.getImportCost(
-                    coo, coi, hs, cust_val, cur, qnty, ref_date
+                    coo, coi, hs, cust_val, cur, qnty, ref_date, tx_id=tx_id
                 )
+                last_status = status
+                last_comment = comment
 
-                ok_rows.append(
-                    {
-                        "coo": coo2,
-                        "coi": coi2,
-                        "hs code": hs2,
-                        "customs value": cust_val2,
-                        "cv currency": cur2,
-                        "weight": qnty2,
-                        "status": status,
-                        "comment": comment,
-                    }
-                )
-                log(
-                    "row_ok",
-                    row=i,
-                    total=total,
-                    coo=coo2,
-                    coi=coi2,
-                    hs=hs2,
-                    status=status,
-                    comment=comment,
-                )
-                success = True
+                try:
+                    status_int = int(status)
+                except Exception:
+                    status_int = None
 
-                if progress_cb:
-                    progress_cb(i, total, f"{i}/{total} | {hs} | {coo}→{coi} | {status} | {comment}")
+                if status_int == 200:
+                    ok_rows.append(
+                        {
+                            "_tx_id": tx_id,
+                            "coo": coo2,
+                            "coi": coi2,
+                            "hs code": hs2,
+                            "customs value": cust_val2,
+                            "cv currency": cur2,
+                            "weight": qnty2,
+                            "status": status,
+                            "comment": comment,
+                        }
+                    )
+                    log(
+                        "row_ok",
+                        row=i,
+                        total=total,
+                        tx_id=tx_id,
+                        coo=coo2,
+                        coi=coi2,
+                        hs=hs2,
+                        status=status,
+                        comment=comment,
+                    )
+                    success = True
+                    if progress_cb:
+                        progress_cb(i, total, f"{i}/{total} | {hs} | {coo}→{coi} | {status} | {comment}")
+                else:
+                    last_err = f"E2Open returned status {status}: {comment}"
+                    log(
+                        "row_api_error",
+                        row=i,
+                        total=total,
+                        tx_id=tx_id,
+                        coo=coo,
+                        coi=coi,
+                        hs=hs,
+                        status=status,
+                        comment=comment,
+                        attempt=attempt,
+                    )
 
             except Exception as e:
                 last_err = str(e)
@@ -408,6 +468,7 @@ def run_api_loop(
                     "row_retry",
                     row=i,
                     total=total,
+                    tx_id=tx_id,
                     coo=coo,
                     coi=coi,
                     hs=hs,
@@ -418,12 +479,15 @@ def run_api_loop(
         if not success:
             failed_rows.append(
                 {
+                    "_tx_id": tx_id,
                     "coo": coo,
                     "coi": coi,
                     "hs code": hs,
                     "customs value": cust_val,
                     "cv currency": cur,
                     "weight": qnty,
+                    "status": str(last_status) if last_status is not None else "",
+                    "comment": last_comment,
                     "error": last_err or "Unknown error",
                 }
             )
@@ -431,6 +495,7 @@ def run_api_loop(
                 "row_failed",
                 row=i,
                 total=total,
+                tx_id=tx_id,
                 coo=coo,
                 coi=coi,
                 hs=hs,
@@ -464,38 +529,36 @@ def _build_combined_failed(
     failed_df: Optional[pd.DataFrame],
     df_missing: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
-    combined = pd.DataFrame(columns=["COO", "COI", "HS Code", "Customs Value"])
+    _ALL_COLS = ["_tx_id", "COO", "COI", "HS Code", "Customs Value", "CV Currency", "Weight"]
+    _RENAME = {
+        "coo": "COO", "coi": "COI", "hs code": "HS Code",
+        "customs value": "Customs Value", "cv currency": "CV Currency", "weight": "Weight",
+    }
+    frames = []
 
-    if failed_df is not None and not failed_df.empty:
-        af = failed_df.copy()
-        for col in ["coo", "coi", "hs code", "customs value"]:
-            if col not in af.columns:
-                af[col] = ""
-        af = af[["coo", "coi", "hs code", "customs value"]].rename(
-            columns={"coo": "COO", "coi": "COI", "hs code": "HS Code", "customs value": "Customs Value"}
-        )
-        af["COO"] = af["COO"].apply(_clean_country)
-        af["COI"] = af["COI"].apply(_clean_country)
-        af["HS Code"] = af["HS Code"].apply(_clean_hs)
-        af["Customs Value"] = pd.to_numeric(af["Customs Value"], errors="coerce").round(2)
-        frames = [f for f in [combined, af] if not f.empty]
-        combined = pd.concat(frames, ignore_index=True) if frames else combined
+    for src_df in (failed_df, df_missing):
+        if src_df is None or src_df.empty:
+            continue
+        f = src_df.copy()
+        f = f.rename(columns={k: v for k, v in _RENAME.items() if k in f.columns})
+        for col in ["COO", "COI"]:
+            if col in f.columns:
+                f[col] = f[col].apply(_clean_country)
+        if "HS Code" in f.columns:
+            f["HS Code"] = f["HS Code"].apply(_clean_hs)
+        if "Customs Value" in f.columns:
+            f["Customs Value"] = pd.to_numeric(f["Customs Value"], errors="coerce").round(2)
+        if "CV Currency" in f.columns:
+            f["CV Currency"] = f["CV Currency"].astype(str).str.strip().str.upper()
+        if "Weight" in f.columns:
+            f["Weight"] = pd.to_numeric(f["Weight"], errors="coerce")
+        keep = [c for c in _ALL_COLS if c in f.columns]
+        frames.append(f[keep])
 
-    if df_missing is not None and not df_missing.empty:
-        miss = df_missing.copy().rename(columns={
-            "coo": "COO", "coi": "COI", "hs code": "HS Code", "customs value": "Customs Value"
-        })
-        for col in ["COO", "COI", "HS Code", "Customs Value"]:
-            if col not in miss.columns:
-                miss[col] = ""
-        miss = miss[["COO", "COI", "HS Code", "Customs Value"]].copy()
-        miss["COO"] = miss["COO"].apply(_clean_country)
-        miss["COI"] = miss["COI"].apply(_clean_country)
-        miss["HS Code"] = miss["HS Code"].apply(_clean_hs)
-        miss["Customs Value"] = pd.to_numeric(miss["Customs Value"], errors="coerce").round(2)
-        combined = pd.concat([combined, miss], ignore_index=True)
+    if not frames:
+        return pd.DataFrame(columns=_ALL_COLS)
 
-    return combined.dropna(how="all")
+    return pd.concat(frames, ignore_index=True).dropna(how="all")
 
 
 def _filter_failed_from_inputs(
@@ -506,30 +569,59 @@ def _filter_failed_from_inputs(
     if combined_failed.empty:
         return df_in, df_raw
 
-    fail_keys = combined_failed[["COO", "COI", "HS Code"]]
-
-    merged_in = df_in.merge(
-        fail_keys,
-        left_on=["coo", "coi", "hs code"],
-        right_on=["COO", "COI", "HS Code"],
-        how="left",
-        indicator=True,
+    # ── Priority: precise _tx_id filter ──────────────────────────────────────
+    has_tx_in = "_tx_id" in df_in.columns
+    has_tx_failed = (
+        "_tx_id" in combined_failed.columns
+        and combined_failed["_tx_id"].notna().any()
     )
-    df_in = merged_in[merged_in["_merge"] == "left_only"].drop(
-        columns=["_merge", "COO", "COI", "HS Code"]
-    )
+    if has_tx_in and has_tx_failed:
+        fail_ids = set(combined_failed["_tx_id"].dropna().astype(str).tolist())
+        df_in = df_in[~df_in["_tx_id"].astype(str).isin(fail_ids)].copy()
+        if not df_raw.empty and "_tx_id" in df_raw.columns:
+            df_raw = df_raw[~df_raw["_tx_id"].astype(str).isin(fail_ids)].copy()
+        return df_in, df_raw
 
+    # ── Fallback: full trade-key filter (most specific available) ─────────────
+    # df_in columns: coo, coi, hs code, customs value, cv currency, weight
+    _IN_KEY_MAP = {
+        "COO": "coo", "COI": "coi", "HS Code": "hs code",
+        "Customs Value": "customs value", "CV Currency": "cv currency", "Weight": "weight",
+    }
+    left_on, right_on = [], []
+    for right_col, left_col in _IN_KEY_MAP.items():
+        if right_col in combined_failed.columns and left_col in df_in.columns:
+            left_on.append(left_col)
+            right_on.append(right_col)
+
+    if left_on:
+        fail_keys = combined_failed[right_on].drop_duplicates()
+        merged_in = df_in.merge(fail_keys, left_on=left_on, right_on=right_on,
+                                how="left", indicator=True)
+        drop_cols = ["_merge"] + [c for c in right_on if c not in df_in.columns]
+        df_in = merged_in[merged_in["_merge"] == "left_only"].drop(
+            columns=drop_cols, errors="ignore"
+        )
+
+    # df_raw columns: coo, coi, hs, custUnitP, cur, qnty
     if not df_raw.empty:
-        merged_raw = df_raw.merge(
-            fail_keys.rename(columns={"HS Code": "hs"}),
-            left_on=["coo", "coi", "hs"],
-            right_on=["COO", "COI", "hs"],
-            how="left",
-            indicator=True,
-        )
-        df_raw = merged_raw[merged_raw["_merge"] == "left_only"].drop(
-            columns=["_merge", "COO", "COI"]
-        )
+        _RAW_KEY_MAP = {
+            "COO": "coo", "COI": "coi", "HS Code": "hs",
+            "Customs Value": "custUnitP", "CV Currency": "cur", "Weight": "qnty",
+        }
+        raw_left_on, raw_right_on = [], []
+        for right_col, raw_col in _RAW_KEY_MAP.items():
+            if right_col in combined_failed.columns and raw_col in df_raw.columns:
+                raw_left_on.append(raw_col)
+                raw_right_on.append(right_col)
+        if raw_left_on:
+            fail_keys_raw = combined_failed[raw_right_on].drop_duplicates()
+            merged_raw = df_raw.merge(fail_keys_raw, left_on=raw_left_on, right_on=raw_right_on,
+                                      how="left", indicator=True)
+            drop_raw = ["_merge"] + [c for c in raw_right_on if c not in df_raw.columns]
+            df_raw = merged_raw[merged_raw["_merge"] == "left_only"].drop(
+                columns=drop_raw, errors="ignore"
+            )
 
     return df_in, df_raw
 
@@ -537,6 +629,7 @@ def _filter_failed_from_inputs(
 def _compute_min_duties(df_raw: pd.DataFrame) -> Optional[pd.DataFrame]:
     """Process raw API session output into a per-lane minimum-duty DataFrame."""
     _DATA_TYPES: Dict[str, str] = {
+        "_tx_id": "object",
         "coo": "object", "coi": "object", "hs": "object",
         "custUnitP": "float64", "cur": "object", "qnty": "float64",
         "status": "object", "comment": "object", "hsNum": "object",
@@ -570,6 +663,8 @@ def _compute_min_duties(df_raw: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
     group_cols = ["coo", "coi", "hs code", "custUnitP", "cur", "qnty"]
+    if "_tx_id" in df_duty.columns:
+        group_cols = ["_tx_id"] + group_cols
     df_min = df_duty.loc[df_duty.groupby(group_cols)["calcVal"].idxmin()].copy()
     df_min = df_min.rename(columns={
         "custUnitP": "customs value", "cur": "cv currency", "qnty": "weight",
@@ -586,6 +681,8 @@ def _compute_min_duties(df_raw: pd.DataFrame) -> Optional[pd.DataFrame]:
             "custUnitP": "customs value", "cur": "cv currency", "qnty": "weight"
         })
         merge_cols = ["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
+        if "_tx_id" in df_default_mfn.columns and "_tx_id" in df_min.columns:
+            merge_cols = ["_tx_id"] + merge_cols
         df_def_min = df_default_mfn.loc[
             df_default_mfn.groupby(merge_cols)["calcVal"].idxmin()
         ].copy()
@@ -616,12 +713,11 @@ def _assemble_merged(
     df_min = df_min.copy()
     df_min["Input Date"] = ref_date
 
-    df_merged = pd.merge(
-        df_in,
-        df_min,
-        on=["coo", "coi", "hs code", "customs value", "cv currency", "weight"],
-        how="left",
-    )
+    merge_cols = ["coo", "coi", "hs code", "customs value", "cv currency", "weight"]
+    if "_tx_id" in df_in.columns and "_tx_id" in df_min.columns:
+        merge_cols = ["_tx_id"] + merge_cols
+
+    df_merged = pd.merge(df_in, df_min, on=merge_cols, how="left")
 
     col_order = [
         "date", "invoice number", "material number",
@@ -995,7 +1091,7 @@ def build_report_html(
         if (failed_n or missing_n) else ""
     )
     narrative = (
-        f"This report covers the E2Open import duty analysis for reference date "
+        f"This report covers the e2open import duty analysis for reference date "
         f"<strong>{_e(ref_date)}</strong>, encompassing <strong>{_int(ok_n)} trade lane(s)</strong>"
         f"{fail_txt}. "
         f"Total customs value under review amounts to <strong>{_eur(customs_sum)}</strong>, "
@@ -1120,14 +1216,14 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>E2Open Duty Report &mdash; {_e(ref_date)}</title>
+<title>Duty Optimizer Report &mdash; {_e(ref_date)}</title>
 <style>{css}</style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
 <div class="report-header">
-  <h1>E2Open Duty Analysis Report</h1>
+  <h1>Duty Analysis Report</h1>
   <div class="meta">
     <span>&#128197; Reference date: <strong>{_e(ref_date)}</strong></span>
     <span>&#9201; Generated: <strong>{_e(generated_at)}</strong></span>
@@ -1255,7 +1351,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 </div>
 
 <div class="footer">
-  Generated by E2Open Duty Cockpit 2.0 &mdash; {_e(generated_at)}
+  Generated by Duty Optimizer 2.0 &mdash; {_e(generated_at)}
 </div>
 
 <script>
@@ -1479,7 +1575,7 @@ def parse_corrections_excel(
     if "_db_id" not in df_corr.columns:
         return None, [
             "The file does not contain the '_db_id' column. "
-            "Only use files exported from Duty Cockpit."
+            "Only use files exported from Duty Optimizer."
         ]
 
     # Normalise _db_id to int
