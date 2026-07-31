@@ -134,6 +134,65 @@ def _clean_customs_value(x: Any) -> float:
         return 0.0
     return float(v)
 
+
+def extract_fta_programs_from_session_output(output: Any) -> pd.DataFrame:
+    """Convert session.output (flat dict of putInStorage rows) into a row-per-program DataFrame.
+
+    Filtering and deduplication strategy:
+    - Only DUTY rows are kept (same filter as the main processing flow); this removes
+      VAT/excise entries whose descriptions would appear mismatched under FTA names.
+    - E2Open returns every rate twice: once as "DEFAULT" and once as "ACTUAL". Those
+      are internal designations, not FTA names. For those pairs, ACTUAL is kept and
+      DEFAULT is dropped when both share the same Rate %, Description and HS Code.
+    - Real FTA program names are left untouched.
+    """
+    cols = ["Program", "Rate %", "Description", "HS Code"]
+    if not output or not isinstance(output, dict):
+        return pd.DataFrame(columns=cols)
+    rows: List[Dict[str, Any]] = []
+    for row in output.values():
+        if not isinstance(row, dict) or "Program" not in row:
+            continue
+        calc_name = row.get("calcName")
+        if calc_name and calc_name != "DUTY":
+            continue
+        rows.append({
+            "Program": row.get("Program") or "",
+            "Rate %": row.get("ratePct"),
+            "Description": row.get("rateDesc") or "",
+            "HS Code": row.get("hsNum") or row.get("hs") or "",
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows)
+    # ratePct is a decimal fraction in E2Open (0.08 = 8%); convert to display percentage.
+    df["Rate %"] = pd.to_numeric(df["Rate %"], errors="coerce") * 100
+
+    # Collapse duplicates on Program name alone: E2Open returns one DUTY entry with a
+    # description (the real rate) and a second with no description (a sub-component),
+    # both under the same rateProgName. Keep the row with non-empty description; break
+    # ties by keeping the highest rate. DEFAULT and ACTUAL are separate rateProgName
+    # values so they remain as separate rows.
+    return (
+        df
+        .assign(_has_desc=(df["Description"].str.strip() != "").astype(int))
+        .sort_values(["_has_desc", "Rate %"], ascending=[False, False])
+        .drop_duplicates(subset=["Program"], keep="first")
+        .drop(columns="_has_desc")
+        .reset_index(drop=True)
+    )
+
+
+def get_effective_hs_from_session_output(output: Any, requested_hs: str) -> str:
+    """Return the HS code E2Open actually used — the alternative if provided, else the requested one."""
+    if not output or not isinstance(output, dict):
+        return requested_hs
+    for row in output.values():
+        if isinstance(row, dict) and row.get("hsNum"):
+            return str(row["hsNum"])
+    return requested_hs
+
+
 def _find_column(df_lower: pd.DataFrame, desired_lower: str) -> Optional[str]:
     # handles spaces and other minor variations
     cols = list(df_lower.columns)

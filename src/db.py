@@ -201,14 +201,60 @@ CREATE TABLE IF NOT EXISTS fx_rates_cache (
 
 _FX_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
 
+_FTA_EXPLORER_DDL = """
+CREATE TABLE IF NOT EXISTS fta_explorer_requests (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    requested_at        TEXT NOT NULL,
+    country_of_import   TEXT NOT NULL,
+    hs_code             TEXT NOT NULL,
+    ref_date            TEXT,
+    account_key         TEXT,
+    account_label       TEXT,
+    environment         TEXT,
+    status              TEXT NOT NULL,
+    comment             TEXT,
+    program_count       INTEGER DEFAULT 0,
+    payload_json        TEXT
+);
+"""
+
 _INDEXES_DDL = """
 CREATE INDEX IF NOT EXISTS idx_merged_run_id    ON merged_results (run_id);
 CREATE INDEX IF NOT EXISTS idx_merged_coo_coi   ON merged_results (coo, coi, hs_code);
 CREATE INDEX IF NOT EXISTS idx_merged_ref_date  ON merged_results (ref_date);
 CREATE INDEX IF NOT EXISTS idx_initiatives_status ON initiatives (status);
+CREATE INDEX IF NOT EXISTS idx_fta_req_requested_at ON fta_explorer_requests (requested_at);
 """
 
 _DB_READY = False  # module-level flag: schema created + migrations run
+
+
+def _delete_bad_fta_records(conn) -> None:
+    """Delete fta_explorer_requests rows where program_count=0 but payload_json
+    actually contains programs — artefacts of the broken extraction function."""
+    rows = conn.execute(
+        "SELECT id, payload_json FROM fta_explorer_requests"
+        " WHERE program_count = 0 AND payload_json IS NOT NULL"
+    ).fetchall()
+    bad_ids = []
+    for row_id, payload_str in rows:
+        if not payload_str:
+            continue
+        try:
+            output = json.loads(payload_str)
+            has_programs = any(
+                isinstance(v, dict) and "Program" in v for v in output.values()
+            )
+        except Exception:
+            has_programs = False
+        if has_programs:
+            bad_ids.append(row_id)
+    if bad_ids:
+        placeholders = ",".join("?" * len(bad_ids))
+        conn.execute(
+            f"DELETE FROM fta_explorer_requests WHERE id IN ({placeholders})",
+            bad_ids,
+        )
 
 
 def init_db() -> None:
@@ -220,9 +266,11 @@ def init_db() -> None:
         conn.executescript(_DDL)
         conn.executescript(_INITIATIVES_DDL)
         conn.executescript(_FX_CACHE_DDL)
+        conn.executescript(_FTA_EXPLORER_DDL)
         _migrate_runs(conn)
         _migrate_merged(conn)
         _migrate_initiatives(conn)
+        _delete_bad_fta_records(conn)
         conn.executescript(_INDEXES_DDL)
     _DB_READY = True
 
@@ -313,6 +361,57 @@ def save_fx_rates(rates: dict) -> None:
             "INSERT INTO fx_rates_cache (fetched_at, rates_json) VALUES (?, ?)",
             (now, json.dumps(rates)),
         )
+
+
+def save_fta_explorer_request(request: dict) -> int:
+    """Persist one FTA explorer lookup request and its result summary."""
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO fta_explorer_requests (
+                requested_at, country_of_import, hs_code, ref_date,
+                account_key, account_label, environment, status, comment,
+                program_count, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request.get("requested_at"),
+                request.get("country_of_import"),
+                request.get("hs_code"),
+                request.get("ref_date"),
+                request.get("account_key"),
+                request.get("account_label"),
+                request.get("environment"),
+                request.get("status"),
+                request.get("comment"),
+                request.get("program_count") or 0,
+                request.get("payload_json"),
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_fta_explorer_requests() -> pd.DataFrame:
+    """Return FTA explorer requests ordered by recency."""
+    init_db()
+    with _connect() as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM fta_explorer_requests ORDER BY requested_at DESC, id DESC",
+            conn,
+        )
+    if df.empty:
+        return df
+    for col in ("id", "program_count"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    for col in ("requested_at", "country_of_import", "hs_code", "ref_date",
+                "account_key", "account_label", "environment", "status", "comment", "payload_json"):
+        if col in df.columns:
+            df[col] = df[col].astype("string")
+    return df
 
 
 # ---------------------------------------------------------------------------

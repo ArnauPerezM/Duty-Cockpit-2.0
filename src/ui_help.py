@@ -253,6 +253,44 @@ _ANSWERS: dict[str, str] = {
         "**Implementation Date**. Transactions are matched by COO + COI + HS Code."
     ),
 
+    # ── FTA Explorer tab ─────────────────────────────────────────────────────
+    "fta_explorer": (
+        "**FTA Explorer Tab**\n\n"
+        "A dedicated lookup tool that queries e2open for all available duty programs "
+        "for a given country of import and HS code, and keeps a searchable history of every lookup.\n\n"
+        "**How to use:**\n"
+        "1. Connect to e2open in the Process tab (required)\n"
+        "2. Open the **FTA Explorer** tab\n"
+        "3. Enter a **Country of Import** (2-letter ISO, e.g. `DE`) and an **HS Code** (digits only)\n"
+        "4. Click **Lookup duty programs** — e2open is queried and results are saved automatically\n\n"
+        "**Results table (Programs panel):**\n"
+        "| Column | Description |\n"
+        "|---|---|\n"
+        "| Program | Duty program name (e.g. DEFAULT, MFN, DOMESTIC KOREA – EU FTA) |\n"
+        "| Rate % | Applicable duty rate, converted from e2open's decimal form (0.08 → 8.0%) |\n"
+        "| Description | Calculation basis from e2open (e.g. *8% OF CIF VALUE*) |\n"
+        "| HS Code | HS code used by e2open; shows the alternative code if e2open substituted one |\n\n"
+        "**DEFAULT vs. ACTUAL:** e2open returns each program twice — once as DEFAULT (scheduled rate) "
+        "and once as ACTUAL (applied rate after any country-specific adjustments). "
+        "Both rows are kept because they may differ. Compare them to see if the applied rate "
+        "differs from the scheduled one.\n\n"
+        "**HS Code substitution:** If e2open cannot find rates for the exact HS code entered, "
+        "it searches progressively shorter partial codes and, if needed, uses its own "
+        "*Partial Duty* lookup to find an alternative. "
+        "When an alternative is used, the HS Code column shows the actual code queried "
+        "and the lookup header reads *HS XXXXXXXXXX (alternative for YYYYYYYYYY)*.\n\n"
+        "**Previous requests table:**\n"
+        "Every lookup is saved to the database. The history table shows: "
+        "Requested At, Country of Import, HS Code, Comment, and Program Count.\n"
+        "- **Click any row** to load the full program list for that historical lookup\n"
+        "- When no row is selected, the latest lookup result is shown below the table\n"
+        "- The *Comment* column reflects the e2open status (e.g. *No issues.*, "
+        "*Partial HS match.*, *E2Open-provided alternative.*, *No info can be found.*)\n\n"
+        "**When no programs are returned:** e2open found no applicable rates for the "
+        "HS code and country combination. Try using a shorter HS code (6 digits) or "
+        "verify the country code is valid ISO-2."
+    ),
+
     # ── Logs tab ─────────────────────────────────────────────────────────────
     "logs": (
         "**Logs Tab**\n\n"
@@ -442,6 +480,7 @@ _ANSWERS: dict[str, str] = {
         "| **Results** | View and edit transaction-level output |\n"
         "| **Opportunities** | Detected duty overpayments |\n"
         "| **Initiatives** | Track duty reduction projects (PRE/POST) |\n"
+        "| **FTA Explorer** | Ad-hoc lookup of all duty programs for a country/HS code |\n"
         "| **Logs** | Execution history and run details |\n"
         "| **Reporting** | Executive dashboard and HTML report export |"
     ),
@@ -517,6 +556,7 @@ _ROUTES: list[tuple[list[str], str]] = [
     (["hs code", "hs", "harmonized", "tariff code", "hs number", "tariff class"], "hscode"),
     (["overpaid", "overpayment", "duty overpaid", "paid too much", "excess duty"], "overpaid"),
     (["program", "duty program", "mfn", "min duty", "default duty", "minimum duties", "program description"], "programs"),
+    (["fta explorer", "fta lookup", "duty program lookup", "lookup duty", "available programs", "available duty", "hs lookup", "country lookup", "previous request", "lookup history", "program lookup", "fta tab", "explorer tab"], "fta_explorer"),
     (["fta", "free trade", "trade agreement", "preferential", "fta applied", "fta previously", "fta afterwards"], "fta"),
     (["trade lane", "lane", "coo coi hs", "trade corridor"], "lane"),
     (["currency", "fx", "exchange rate", "eur", "conversion", "usd", "gbp", "frankfurter"], "currency"),
@@ -537,6 +577,7 @@ _FALLBACK = (
     "- *Overpaid duties and opportunities*\n"
     "- *Initiatives (PRE/POST comparison table, status, groups, End Date)*\n"
     "- *Savings Capture Rate*\n"
+    "- *FTA Explorer (duty program lookup by country and HS code)*\n"
     "- *Filters, backup/restore, or logout*\n"
     "- *Reporting (World Map, Heat Map, Monthly Trend, HTML export)*\n"
     "- *Troubleshooting errors*"
@@ -546,7 +587,7 @@ _WELCOME = (
     "Hi! I can answer questions about how **Duty Optimizer** works.\n\n"
     "Ask me about: *getting started, Excel format, e2open credentials, "
     "COO/COI/HS Code, FTA, overpaid duties, opportunities, initiatives, "
-    "PRE/POST comparison, Savings Capture Rate, End Date, "
+    "PRE/POST comparison, Savings Capture Rate, End Date, FTA Explorer, "
     "Reporting charts (World Map, Heat Map, Monthly Trend), "
     "filters, backup/restore,* or *troubleshooting*."
 )

@@ -16,6 +16,7 @@ from src.db import (
     find_duplicate_transactions,
     load_initiatives,
     init_db,
+    load_fta_explorer_requests,
 )
 from src.ui_shared import (
     load_custom_css,
@@ -32,6 +33,7 @@ from src.ui_initiatives import render_tab_initiatives
 from src.ui_logs import render_tab_logs
 from src.ui_reporting import render_tab_reporting
 from src.ui_help import render_help_dialog
+from src.ui_fta_explorer import render_tab_fta_explorer
 
 
 init_session_state()
@@ -81,7 +83,7 @@ if render_hero_header(
 # preserve the selected tab (st.tabs has no native way to set the active tab,
 # so a button click in any tab would otherwise snap back to the first tab).
 # ─────────────────────────────────────────────────────────────────────────────
-TAB_LABELS = ["Process", "Results", "Opportunities", "Initiatives", "Logs", "Reporting"]
+TAB_LABELS = ["Process", "Results", "Opportunities", "Initiatives", "FTA Explorer", "Logs", "Reporting"]
 
 with st.container(key="duty_tab_nav"):
     st.radio(
@@ -387,6 +389,12 @@ elif active_tab == "Initiatives":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FTA Explorer tab
+# ─────────────────────────────────────────────────────────────────────────────
+elif active_tab == "FTA Explorer":
+    render_tab_fta_explorer()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logs tab
 # ─────────────────────────────────────────────────────────────────────────────
 elif active_tab == "Logs":
@@ -396,6 +404,7 @@ elif active_tab == "Logs":
         run_summary=st.session_state.run_summary,
         run_history=run_history_df,
         total_queries=_total_queries,
+        fta_requests=load_fta_explorer_requests(),
     )
 
 

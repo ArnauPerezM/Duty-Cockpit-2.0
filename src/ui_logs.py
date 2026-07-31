@@ -23,6 +23,7 @@ def render_tab_logs(
     run_summary: Optional[Dict[str, Any]],
     run_history: Optional[pd.DataFrame] = None,
     total_queries: int = 0,
+    fta_requests: Optional[pd.DataFrame] = None,
 ) -> None:
     st.subheader("Logs")
 
@@ -91,6 +92,15 @@ def render_tab_logs(
         st.dataframe(_stripe(_rh_disp), width='stretch', column_config=_auto_col_cfg(_rh_disp))
     else:
         st.info("No previous runs found in the database.")
+
+    # ── FTA explorer request history ──────────────────────────────────────
+    if fta_requests is not None and not fta_requests.empty:
+        st.markdown("### FTA Explorer requests")
+        _fta_disp = fta_requests.copy()
+        if "requested_at" in _fta_disp.columns:
+            _fta_disp = _fta_disp.sort_values("requested_at", ascending=False, kind="mergesort")
+        _fta_disp = _fta_disp[[c for c in ["requested_at", "country_of_import", "hs_code", "ref_date", "status", "comment", "program_count"] if c in _fta_disp.columns]]
+        st.dataframe(_stripe(_fta_disp), width='stretch', column_config=_auto_col_cfg(_fta_disp))
 
     # ── Current session event log ──────────────────────────────────────────
     if not logs:
